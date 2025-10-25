@@ -5,10 +5,10 @@ build:
 	docker build -t bancho:latest .
 
 run:
-	docker compose up bancho mysql redis
+	docker compose up bancho mysql redis pma
 
 run-bg:
-	docker compose up -d bancho mysql redis
+	docker compose up -d bancho mysql redis pma
 
 run-cfd:
 	docker compose -f docker-compose.cloudflared.yml up

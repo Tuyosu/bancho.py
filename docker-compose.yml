@@ -2,9 +2,9 @@ services:
   ## shared services
 
   mysql:
-    image: mysql:9.4.0
-    # ports:
-    #   - ${DB_PORT}:${DB_PORT}
+    image: mysql:latest
+    ports:
+      - ${DB_PORT}:${DB_PORT}
     environment:
       MYSQL_USER: ${DB_USER}
       MYSQL_PASSWORD: ${DB_PASS}
@@ -21,27 +21,29 @@ services:
       timeout: 20s
       retries: 10
 
+  pma:
+    image: phpmyadmin:latest
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+    ports:
+      - 8001:80
+
   redis:
-    image: redis:8.2.2
+    image: bitnami/redis:latest
     # ports:
     #   - ${REDIS_PORT}:${REDIS_PORT}
     user: root
     volumes:
-      - redis-data:/data
-    command:
-      - sh
-      - -c
-      - |
-        if [ -n "$${REDIS_PASS}" ]; then
-          redis-server --requirepass "$${REDIS_PASS}"
-        else
-          redis-server
-        fi
+      - redis-data:/bitnami/redis/data
+    environment:
+      - ALLOW_EMPTY_PASSWORD=yes
+      - REDIS_PASSWORD=${REDIS_PASS}
 
   # Cloudflare tunneling via Zero-Trust
   # cloudflared:
   #   container_name: cloudflared
-  #   image: cloudflare/cloudflared:2025.9.1
+  #   image: cloudflare/cloudflared
   #   restart: unless-stopped
   #   command: tunnel run
   #   environment:
@@ -100,7 +102,6 @@ services:
       - SSL_CERT_PATH=${SSL_CERT_PATH}
       - SSL_KEY_PATH=${SSL_KEY_PATH}
       - DEVELOPER_MODE=${DEVELOPER_MODE}
-      - DB_USE_SSL=${DB_USE_SSL}
 
 volumes:
   data:

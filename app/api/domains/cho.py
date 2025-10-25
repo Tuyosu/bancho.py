@@ -7,6 +7,9 @@ import hashlib
 import re
 import struct
 import time
+import os
+import app.usecases.performance
+from app.usecases.performance import ScoreParams
 from collections.abc import Callable
 from collections.abc import Mapping
 from datetime import date
@@ -16,6 +19,7 @@ from typing import Literal
 from typing import TypedDict
 from zoneinfo import ZoneInfo
 
+from app.bg_loops import OSU_CLIENT_MIN_PING_INTERVAL
 import bcrypt
 from fastapi import APIRouter
 from fastapi import Response
@@ -64,6 +68,7 @@ from app.packets import LoginFailureReason
 from app.repositories import client_hashes as client_hashes_repo
 from app.repositories import ingame_logins as logins_repo
 from app.repositories import mail as mail_repo
+from app.repositories import scores_suspicion
 from app.repositories import users as users_repo
 from app.state import services
 from app.usecases.performance import ScoreParams
@@ -72,6 +77,8 @@ OSU_API_V2_CHANGELOG_URL = "https://osu.ppy.sh/api/v2/changelog"
 
 BEATMAPS_PATH = Path.cwd() / ".data/osu"
 DISK_CHAT_LOG_FILE = ".data/logs/chat.log"
+
+PPYSB_CLIENT_VERSION = "b20210125.1 SB Edition.x01"  # (ppysb feature)
 
 BASE_DOMAIN = app.settings.DOMAIN
 
@@ -118,6 +125,7 @@ async def bancho_http_handler() -> Response:
 async def bancho_view_online_users() -> Response:
     """see who's online"""
     new_line = "\n"
+    current_time = time.time()
 
     players: list[Player] = []
     bots: list[Player] = []
@@ -127,16 +135,38 @@ async def bancho_view_online_users() -> Response:
         else:
             players.append(p)
 
-    id_max_length = len(str(max(p.id for p in app.state.sessions.players)))
-
     return HTMLResponse(
         f"""
 <!DOCTYPE html>
+<head>
+<meta charset="utf-8">
+<style>
+table, th, td {{
+  border: 1px solid black;
+  border-collapse: collapse;
+}}
+</style>
+</head>
 <body style="font-family: monospace;  white-space: pre-wrap;"><a href="/">back</a>
-users:
-{new_line.join([f"({p.id:>{id_max_length}}): {p.safe_name}" for p in players])}
-bots:
-{new_line.join(f"({p.id:>{id_max_length}}): {p.safe_name}" for p in bots)}
+<table>
+  <thead>
+      <tr>
+        <th>id</th>
+        <th>name</th>
+        <th>disconnect timeout</th>
+      </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <th colspan="99">users: {len(players)}</th>
+  </tr>
+  {new_line.join([f'<tr> <td style="text-align: right">{p.id}</td> <td>{p.safe_name}</td> <td style="text-align: right">{round(current_time - p.last_recv_time - OSU_CLIENT_MIN_PING_INTERVAL)}s</td>' for p in players])}
+  <tr>
+    <th colspan="99">bots: {len(bots)}</th>
+  </tr>
+  {new_line.join([f'<tr> <td style="text-align: right">{p.id}</td> <td>{p.safe_name}</td> <td style="text-align: right">-</td>' for p in bots])}
+  </tbody>
+</table>
 </body>
 </html>""",
     )
@@ -209,8 +239,8 @@ async def bancho_handler(
         return Response(
             content=(
                 app.packets.notification("Server has restarted.")
-                + app.packets.restart_server(0)  # ms until reconnection
-            ),
+                + app.packets.restart_server(0)
+            ),  # ms until reconnection
         )
 
     if player.restricted:
@@ -564,29 +594,35 @@ async def get_allowed_client_versions(osu_stream: OsuStream) -> set[date] | None
 
     Returns None if the connection to the osu! api fails.
     """
-    osu_stream_str = osu_stream.value
-    if osu_stream in (OsuStream.STABLE, OsuStream.BETA):
-        osu_stream_str += "40"  # i wonder why this exists
-
-    response = await services.http_client.get(
-        OSU_API_V2_CHANGELOG_URL,
-        params={"stream": osu_stream_str},
-    )
-    if not response.is_success:
-        return None
-
+    osu_stream_strs = []
     allowed_client_versions: set[date] = set()
-    for build in response.json()["builds"]:
-        version = date(
-            int(build["version"][0:4]),
-            int(build["version"][4:6]),
-            int(build["version"][6:8]),
+
+    if osu_stream == OsuStream.STABLE:
+        osu_stream_strs.append(osu_stream.value + "40")  # i wonder why this exists
+    elif osu_stream == OsuStream.TOURNEY:
+        # osu!tourney clients are allowed to connect with any version
+        osu_stream_strs.append("stable40")
+        osu_stream_strs.append("cuttingedge")
+
+    for osu_stream_str in osu_stream_strs:
+        response = await services.http_client.get(
+            OSU_API_V2_CHANGELOG_URL,
+            params={"stream": osu_stream_str},
         )
-        allowed_client_versions.add(version)
-        if any(entry["major"] for entry in build["changelog_entries"]):
-            # this build is a major iteration to the client
-            # don't allow anything older than this
-            break
+        if not response.is_success:
+            return None
+
+        for build in response.json()["builds"]:
+            version = date(
+                int(build["version"][0:4]),
+                int(build["version"][4:6]),
+                int(build["version"][6:8]),
+            )
+            allowed_client_versions.add(version)
+            if any(entry["major"] for entry in build["changelog_entries"]):
+                # this build is a major iteration to the client
+                # don't allow anything older than this
+                break
 
     return allowed_client_versions
 
@@ -598,13 +634,26 @@ def parse_adapters_string(adapters_string: str) -> tuple[list[str], bool]:
 
 
 async def authenticate(
-    username: str,
+    handle: str,
     untrusted_password: bytes,
 ) -> users_repo.User | None:
     user_info = await users_repo.fetch_one(
-        name=username,
+        name=handle,
         fetch_all_fields=True,
+    ) or (
+        await users_repo.fetch_one(
+            id=int(handle),
+            fetch_all_fields=True,
+        )
+        if handle.isdigit()
+        else (
+            await users_repo.fetch_one(
+                email=handle,
+                fetch_all_fields=True,
+            )
+        )
     )
+
     if user_info is None:
         return None
 
@@ -648,44 +697,84 @@ async def handle_osu_login_request(
       other: valid id, logged in
     """
 
-    # parse login data
+    # parse login data (ppysb feature)
     login_data = parse_login_data(body)
+    bypass = login_data["osu_version"] == PPYSB_CLIENT_VERSION
 
-    # perform some validation & further parsing on the data
+    # perform some validation & further parsing on the data (ppysb feature)
 
-    osu_version = parse_osu_version_string(login_data["osu_version"])
-    if osu_version is None:
-        return {
-            "osu_token": "invalid-request",
-            "response_body": (
-                app.packets.login_reply(LoginFailureReason.AUTHENTICATION_FAILED)
-                + app.packets.notification("Please restart your osu! and try again.")
+    if bypass:
+        osu_version = OsuVersion(
+            date=date(
+                year=2021,
+                month=1,
+                day=25,
             ),
-        }
-
-    if app.settings.DISALLOW_OLD_CLIENTS:
-        allowed_client_versions = await get_allowed_client_versions(
-            osu_version.stream,
+            revision=None,
+            stream=OsuStream("ppysb"),
         )
-        # in the case where the osu! api fails, we'll allow the client to connect
-        if (
-            allowed_client_versions is not None
-            and osu_version.date not in allowed_client_versions
-        ):
+    else:
+        match = regexes.OSU_VERSION.match(login_data["osu_version"])
+        if match is None:
             return {
-                "osu_token": "client-too-old",
-                "response_body": (
-                    app.packets.version_update()
-                    + app.packets.login_reply(LoginFailureReason.OLD_CLIENT)
-                ),
+                "osu_token": "invalid-request",
+                "response_body": b"",
             }
 
-    adapters, running_under_wine = parse_adapters_string(login_data["adapters_str"])
+        osu_version = OsuVersion(
+            date=date(
+                year=int(match["date"][0:4]),
+                month=int(match["date"][4:6]),
+                day=int(match["date"][6:8]),
+            ),
+            revision=int(match["revision"]) if match["revision"] else None,
+            stream=OsuStream(match["stream"] or "stable"),
+        )
+
+    # bypassed client should not be figured of old clients
+    if not bypass and app.settings.DISALLOW_OLD_CLIENTS:
+        osu_client_stream = osu_version.stream.value
+        if osu_client_stream in ("stable", "beta"):
+            osu_client_stream += "40"  # TODO: why?
+
+        allowed_client_versions = set()
+
+        # TODO: put this behind a layer of abstraction
+        #       for better handling of the error cases
+        response = await services.http_client.get(
+            OSU_API_V2_CHANGELOG_URL,
+            params={"stream": osu_client_stream},
+        )
+        response.raise_for_status()
+        for build in response.json()["builds"]:
+            version = date(
+                int(build["version"][0:4]),
+                int(build["version"][4:6]),
+                int(build["version"][6:8]),
+            )
+            allowed_client_versions.add(version)
+
+            if any(entry["major"] for entry in build["changelog_entries"]):
+                # this build is a major iteration to the client
+                # don't allow anything older than this
+                break
+
+    dev_acc = ['nyoemii', 'MyAngelMiku']
+    if login_data["username"].replace(' ', '_').lower() not in dev_acc:
+        if str(osu_version.date) != app.settings.ALLOWED_CLIENT_VER:
+            return {
+                "osu_token": "no",
+                "response_body": (app.packets.notification(f'Please update your client!\nYour version: {osu_version.date}\nCurrent version: {os.environ["ALLOWED_CLIENT_VER"]}')),
+            }
+
+    running_under_wine = login_data["adapters_str"] == "runningunderwine"
+    adapters = [a for a in login_data["adapters_str"][:-1].split(".")]
+
     if not (running_under_wine or any(adapters)):
         return {
             "osu_token": "empty-adapters",
             "response_body": (
-                app.packets.login_reply(LoginFailureReason.AUTHENTICATION_FAILED)
+                app.packets.login_reply(-1)
                 + app.packets.notification("Please restart your osu! and try again.")
             ),
         }
@@ -696,7 +785,23 @@ async def handle_osu_login_request(
 
     # disallow multiple sessions from a single user
     # with the exception of tourney spectator clients
-    player = app.state.sessions.players.get(name=login_data["username"])
+    # ppy.sb feature: allow login with id or email
+    player = app.state.sessions.players.get(name=login_data["username"]) or (
+        app.state.sessions.players.get(
+            id=int(login_data["username"]),
+        )
+        if login_data["username"].isdigit()
+        else None
+    )
+    if player is None:
+        email_user = await users_repo.fetch_one(
+            email=login_data["username"],
+            fetch_all_fields=True,
+        )
+        if email_user:
+            player = app.state.sessions.players.get(id=email_user["id"])
+    # end ppy.sb feature
+
     if player and osu_version.stream != "tourney":
         # check if the existing session is still active
         if (login_time - player.last_recv_time) < 10:
@@ -722,17 +827,16 @@ async def handle_osu_login_request(
             ),
         }
 
-    if osu_version.stream is OsuStream.TOURNEY and not (
-        user_info["priv"] & Privileges.DONATOR
-        and user_info["priv"] & Privileges.UNRESTRICTED
-    ):
-        # trying to use tourney client with insufficient privileges.
-        return {
-            "osu_token": "no",
-            "response_body": app.packets.login_reply(
-                LoginFailureReason.AUTHENTICATION_FAILED,
-            ),
-        }
+    if osu_version.stream is OsuStream.TOURNEY:
+        allowed_priv = Privileges.DONATOR | Privileges.TOURNEY_MANAGER | Privileges.UNRESTRICTED
+        if user_info["priv"] & allowed_priv <= Privileges.UNRESTRICTED:
+            # trying to use tourney client with insufficient privileges.
+            return {
+                "osu_token": "no",
+                "response_body": app.packets.login_reply(
+                    LoginFailureReason.AUTHENTICATION_FAILED,
+                ),
+            }
 
     """ login credentials verified """
 
@@ -860,6 +964,8 @@ async def handle_osu_login_request(
         login_time=login_time,
         is_tourney_client=osu_version.stream == "tourney",
         api_key=user_info["api_key"],
+        lb_preference=user_info["lb_preference"],
+        show_bancho_lb=user_info["show_bancho_lb"] == 1,
     )
 
     data = bytearray(app.packets.protocol_version(19))
@@ -884,8 +990,8 @@ async def handle_osu_login_request(
         if (
             not channel.auto_join
             or not channel.can_read(player.priv)
-            or channel.real_name == "#lobby"  # (can't be in mp lobby @ login)
-        ):
+            or channel.real_name == "#lobby"
+        ):  # (can't be in mp lobby @ login)
             continue
 
         # send chan info to all players who can see
@@ -909,6 +1015,8 @@ async def handle_osu_login_request(
     # information from sql to be cached.
     await player.stats_from_sql_full()
     await player.relationships_from_sql()
+    if player.show_bancho_lb:
+        await player.update_bancho_rank()
 
     # TODO: fetch player.recent_scores from sql
 
@@ -948,21 +1056,7 @@ async def handle_osu_login_request(
             read=False,
         )
 
-        sent_to: set[int] = set()
-
         for msg in mail_rows:
-            # Add "Unread messages" header as the first message
-            # for any given sender, to make it clear that the
-            # messages are coming from the mail system.
-            if msg["from_id"] not in sent_to:
-                data += app.packets.send_message(
-                    sender=msg["from_name"],
-                    msg="Unread messages",
-                    recipient=msg["to_name"],
-                    sender_id=msg["from_id"],
-                )
-                sent_to.add(msg["from_id"])
-
             msg_time = datetime.fromtimestamp(msg["time"])
             data += app.packets.send_message(
                 sender=msg["from_name"],
@@ -996,6 +1090,8 @@ async def handle_osu_login_request(
             )
 
     else:
+        is_frozen = await scores_suspicion.has_suspicion(player.id)
+
         # player is restricted, one way data
         for o in app.state.sessions.players.unrestricted:
             # enqueue them to us.

@@ -27,6 +27,8 @@ from typing import Optional
 from typing import TypedDict
 from urllib.parse import urlparse
 
+from sqlalchemy import update
+
 import cpuinfo
 import psutil
 import timeago
@@ -93,11 +95,20 @@ class Command(NamedTuple):
 
 
 class CommandSet:
+    trigger: str
+    doc: str
+    commands: list[Command]
+    subcommands: list[CommandSet]
+    parent: CommandSet | None
+
     def __init__(self, trigger: str, doc: str) -> None:
         self.trigger = trigger
         self.doc = doc
 
         self.commands: list[Command] = []
+
+        self.subcommands: list[CommandSet] = []
+        self.parent = None
 
     def add(
         self,
@@ -110,9 +121,10 @@ class CommandSet:
                 Command(
                     # NOTE: this method assumes that functions without any
                     # triggers will be named like '{self.trigger}_{trigger}'.
-                    triggers=(
-                        [f.__name__.removeprefix(f"{self.trigger}_").strip()] + aliases
-                    ),
+                    triggers=[
+                        self.remove_prefix(f.__name__),
+                        *aliases,
+                    ],
                     callback=f,
                     priv=priv,
                     hidden=hidden,
@@ -123,6 +135,47 @@ class CommandSet:
             return f
 
         return wrapper
+
+    def subcommand(self, set: CommandSet) -> CommandSet:
+        self.subcommands.append(set)
+        set.parent = self
+
+        return set
+
+    def remove_prefix(self, name: str) -> str:
+        _name = (
+            self.parent.remove_prefix(name).removeprefix(self.trigger + "_").strip()
+            if self.parent is not None
+            else name.removeprefix(f"{self.trigger}_").strip()
+        )
+
+        return _name
+
+
+def help_pure(
+    ctx: Context,
+    cmd_or_sets: list[Command | CommandSet],
+    prefix: str = app.settings.COMMAND_PREFIX,
+) -> str:
+    """Show all documented streamer commands the player can access."""
+    cb = []
+    cmds = []
+
+    for cmd in cmd_or_sets:
+        match cmd:
+            case Command():
+                if not cmd.doc or ctx.player.priv & cmd.priv != cmd.priv:
+                    # no doc, or insufficient permissions.
+                    continue
+                if cmd.callback in cb:
+                    continue
+
+                cmds.append(f"{prefix} {cmd.triggers[0]}: {cmd.doc}")
+                cb.append(cmd.callback)
+            case CommandSet():
+                cmds.append(f"{prefix} {cmd.trigger}: {cmd.doc}")
+
+    return "\n".join(cmds)
 
 
 mp_commands = CommandSet("mp", "Multiplayer commands.")
@@ -135,6 +188,8 @@ command_sets = [
     pool_commands,
     clan_commands,
 ]
+
+import app.sb
 
 
 def command(
@@ -260,8 +315,10 @@ async def reconnect(ctx: Context) -> str | None:
     return None
 
 
-@command(Privileges.SUPPORTER)
+# @command(Privileges.SUPPORTER) # ppysb feature: disable ingame name changing
+@command(Privileges.UNRESTRICTED)
 async def changename(ctx: Context) -> str | None:
+    return f"[https://osu.ppy.sb/me/settings User Settings - Guccho]"
     """Change your username."""
     name = " ".join(ctx.args).strip()
 
@@ -287,6 +344,40 @@ async def changename(ctx: Context) -> str | None:
 
     return None
 
+
+@command(Privileges.UNRESTRICTED)
+async def bancho(ctx: Context) -> str | None:
+    """Switches the leaderboard display between bancho and bancho.py."""
+    if len(ctx.args) < 1 or ctx.args[0] not in ("on", "off"):
+        return "Invalid syntax: !bancho <on/off>"
+
+    await users_repo.partial_update(
+        id=ctx.player.id,
+        show_bancho_lb=True if ctx.args[0] == "on" else False,
+    )
+
+    ctx.player.enqueue(
+        app.packets.notification(f"Bancho leaderboard {ctx.args[0]}!"),
+    )
+    ctx.player.logout()
+
+    return None
+
+@command(Privileges.UNRESTRICTED, aliases=["lb"])
+async def leaderboard(ctx: Context) -> str | None:
+    if len(ctx.args) < 1 or ctx.args[0] not in ("pp", "score"):
+        return "Invalid syntax: !leaderboard <pp/score>"
+
+    await users_repo.partial_update(
+        id=ctx.player.id,
+        lb_preference=users_repo.LeaderboardPreference(ctx.args[0]),
+    )
+    ctx.player.enqueue(
+        app.packets.notification(f"Leaderboard display mode set to {ctx.args[0]}!")
+    )
+    ctx.player.logout()
+
+    return None
 
 @command(Privileges.UNRESTRICTED, aliases=["bloodcat", "beatconnect", "chimu", "q"])
 async def maplink(ctx: Context) -> str | None:
@@ -378,13 +469,12 @@ async def top(ctx: Context) -> str | None:
             return "Invalid username."
 
         # specific player provided
-        user = await users_repo.fetch_one(name=ctx.args[1])
+        player = app.state.sessions.players.get(name=ctx.args[1])
+        if not player:
+            return "Player not found."
     else:
         # no player provided, use self
-        user = await users_repo.fetch_one(id=ctx.player.id)
-
-    if user is None:
-        return "Player not found."
+        player = ctx.player
 
     # !top rx!std
     mode = GAMEMODE_REPR_LIST.index(ctx.args[0])
@@ -398,15 +488,13 @@ async def top(ctx: Context) -> str | None:
         "AND s.status = 2 "
         "AND b.status in (2, 3) "
         "ORDER BY s.pp DESC LIMIT 10",
-        {"user_id": user["id"], "mode": mode},
+        {"user_id": player.id, "mode": mode},
     )
     if not scores:
         return "No scores"
 
-    user_embed = f"[https://{app.settings.DOMAIN}/u/{user['id']} {user['name']}]"
-
     return "\n".join(
-        [f"Top 10 scores for {user_embed} ({ctx.args[0]})."]
+        [f"Top 10 scores for {player.embed} ({ctx.args[0]})."]
         + [
             TOP_SCORE_FMTSTR.format(idx=idx + 1, domain=app.settings.DOMAIN, **s)
             for idx, s in enumerate(scores)
@@ -895,6 +983,28 @@ async def user(ctx: Context) -> str | None:
         ),
     )
 
+@command(Privileges.ADMINISTRATOR, hidden=True)
+async def kaupec(ctx: Context):
+    if Privileges.ADMINISTRATOR:
+        async with app.state.services.database.transaction():
+            await app.state.services.database.execute(
+                "UPDATE maps SET status = 2",
+            )
+            await app.state.services.database.execute(
+                "UPDATE maps SET status = 2 WHERE status = 3",
+            )
+            
+            # Update cache to sync with database changes
+            # Update all beatmaps in cache to status 2 (ranked)
+            for md5, bmap in app.state.cache.beatmap.items():
+                bmap.status = RankedStatus.Ranked  # assuming 2 = RANKED
+            
+            # Update all beatmapsets in cache
+            for set_id, bmap_set in app.state.cache.beatmapset.items():
+                for bmap in bmap_set.maps:
+                    bmap.status = RankedStatus.Ranked
+        
+        return "Successfully pulled a kaupec!"
 
 @command(Privileges.ADMINISTRATOR, hidden=True)
 async def restrict(ctx: Context) -> str | None:
@@ -1161,6 +1271,29 @@ async def givedonator(ctx: Context) -> str | None:
 
     return f"Added {ctx.args[1]} of donator status to {target}."
 
+
+@command(Privileges.DEVELOPER)
+async def wipe(ctx: Context) -> str | None:
+    if len(ctx.args) < 1:
+        return "Invalid command. Usage: !wipe <username>"
+
+    user = await users_repo.fetch_one(name=ctx.args[0])
+    if user is None:
+        return "Player not found."
+
+    user_id = user["id"]
+    await app.state.services.database.execute(
+        "DELETE FROM scores WHERE userid = :user_id",
+        {"user_id": user_id}
+    )
+    await app.state.services.database.execute(
+        "UPDATE stats SET tscore = 0, rscore = 0, pp = 0, plays = 0, "
+        "acc = 0, max_combo = 0, total_hits = 0, replay_views = 0, "
+        "xh_count = 0, x_count = 0, sh_count = 0, s_count = 0, a_count = 0 "
+        "WHERE id = :user_id",
+        {"user_id": user_id}
+    )
+    return "Player wiped."
 
 @command(Privileges.DEVELOPER)
 async def wipemap(ctx: Context) -> str | None:
@@ -2367,13 +2500,12 @@ async def clan_disband(ctx: Context) -> str | None:
     await clans_repo.delete_one(clan["id"])
 
     # remove all members from the clan
-    clan_member_ids = [
-        clan_member["id"]
-        for clan_member in await users_repo.fetch_many(clan_id=clan["id"])
-    ]
-    for member_id in clan_member_ids:
-        await users_repo.partial_update(member_id, clan_id=0, clan_priv=0)
+    clan_member_ids = [clan_member["id"] for clan_member in await users_repo.fetch_many(clan_id=clan["id"])]
 
+    await app.state.services.database.execute(
+        update(users_repo.UsersTable).where(users_repo.UsersTable.clan_id == clan["id"]).values(clan_id=0, clan_priv=0)
+    )
+    for member_id in clan_member_ids:
         member = app.state.sessions.players.get(id=member_id)
         if member:
             member.clan_id = None
@@ -2504,37 +2636,78 @@ async def process_commands(
             # case-insensitive triggers
             trigger = trigger.lower()
 
-            commands = cmd_set.commands
+            commands = [*cmd_set.subcommands, *cmd_set.commands]
             break
     else:
         # no set commands matched, check normal commands.
         commands = regular_commands
 
-    for cmd in commands:
-        if trigger in cmd.triggers and player.priv & cmd.priv == cmd.priv:
-            # found matching trigger with sufficient privs
-            try:
-                res = await cmd.callback(
-                    Context(
-                        player=player,
-                        trigger=trigger,
-                        args=args,
-                        recipient=target,
-                    ),
+    res, cmd = await process_commands_pure(
+        player=player,
+        target=target,
+        msg=msg,
+        head=trigger,
+        args=args,
+        cmd_or_sets=[*commands],
+    )
+    if res is not None:
+        # we have a message to return, include elapsed time
+        elapsed = app.logging.magnitude_fmt_time(clock_ns() - start_time)
+        return {
+            "resp": f"{res} | Elapsed: {elapsed}",
+            "hidden": cmd.hidden if cmd else False,
+        }
+    else:
+        # no message to return
+        return {"resp": None, "hidden": False}
+
+
+async def process_commands_pure(
+    player: Player,
+    target: Channel | Player,
+    msg: str,
+    head: str,
+    args: list[str],
+    cmd_or_sets: list[Command | CommandSet],
+) -> tuple[str | None, Command | None]:
+    for cmd in cmd_or_sets:
+        match cmd:
+            case Command():
+                if head in cmd.triggers and player.priv & cmd.priv == cmd.priv:
+                    # found matching trigger with sufficient privs
+                    try:
+                        res = await cmd.callback(
+                            Context(
+                                player=player,
+                                trigger=head,
+                                args=args,
+                                recipient=target,
+                            ),
+                        )
+                        return (res, cmd)
+                    except Exception:
+                        # print exception info to the console,
+                        # but do not break the player's session.
+                        traceback.print_exc()
+
+                        res = "An exception occurred when running the command."
+                        return (res, None)
+            case CommandSet():
+                if head != cmd.trigger:
+                    continue
+
+                # found matching command set
+                if not args:
+                    args = [""]
+                head, *args = args
+
+                return await process_commands_pure(
+                    player=player,
+                    target=target,
+                    msg=msg,
+                    head=head,
+                    args=args,
+                    cmd_or_sets=[*cmd.subcommands, *cmd.commands],
                 )
-            except Exception:
-                # print exception info to the console,
-                # but do not break the player's session.
-                traceback.print_exc()
 
-                res = "An exception occurred when running the command."
-
-            if res is not None:
-                # we have a message to return, include elapsed time
-                elapsed = app.logging.magnitude_fmt_time(clock_ns() - start_time)
-                return {"resp": f"{res} | Elapsed: {elapsed}", "hidden": cmd.hidden}
-            else:
-                # no message to return
-                return {"resp": None, "hidden": False}
-
-    return None
+    return (None, None)

@@ -7,6 +7,7 @@ from typing import TypedDict
 
 from akatsuki_pp_py import Beatmap
 from akatsuki_pp_py import Calculator
+from akatsuki_pp_py import DifficultyAttributes
 
 from app.constants.mods import Mods
 
@@ -58,7 +59,7 @@ class PerformanceResult(TypedDict):
 
 
 def calculate_performances(
-    osu_file_path: str,
+    osu_file: bytes | None,
     scores: Iterable[ScoreParams],
 ) -> list[PerformanceResult]:
     """\
@@ -70,7 +71,10 @@ def calculate_performances(
     implemented here to handle cases where e.g. the beatmap file is invalid
     or there an issue during calculation.
     """
-    calc_bmap = Beatmap(path=osu_file_path)
+    if not osu_file:
+        return []
+
+    calc_bmap = Beatmap(content=osu_file)
 
     results: list[PerformanceResult] = []
 
@@ -136,3 +140,18 @@ def calculate_performances(
         )
 
     return results
+
+
+def calculate_difficulty(bmap_file: bytes, mode: int) -> DifficultyAttributes | None:
+    calc_bmap = Beatmap(bytes=bmap_file)
+    calculator = Calculator(mode=mode)
+
+    result = calculator.difficulty(calc_bmap)
+
+    if math.isnan(result.stars):
+        return None
+
+    if math.isinf(result.stars):
+        return None
+
+    return result

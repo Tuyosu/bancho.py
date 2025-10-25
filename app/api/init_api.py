@@ -1,4 +1,4 @@
-# #!/usr/bin/env python3.11
+# #!/usr/bin/env python3.13
 from __future__ import annotations
 
 import asyncio
@@ -118,6 +118,11 @@ async def lifespan(asgi_app: BanchoAPI) -> AsyncIterator[None]:
     await app.state.services.database.disconnect()
     await app.state.services.redis.aclose()
 
+    await app.state.services.osu_api_v1.aclose()
+    del app.state.services.osu_api_v1
+    await app.state.services.osu_api_v2.aclose()
+    del app.state.services.osu_api_v2
+
     if app.state.services.datadog is not None:
         app.state.services.datadog.stop()  # type: ignore[no-untyped-call]
         app.state.services.datadog.flush()  # type: ignore[no-untyped-call]
@@ -177,6 +182,7 @@ def init_routes(asgi_app: BanchoAPI) -> None:
 
         asgi_app.host(f"osu.{domain}", domains.osu.router)
         asgi_app.host(f"b.{domain}", domains.map.router)
+        asgi_app.host(f"a.{domain}", domains.ava.router)
 
         # bancho.py's developer-facing api
         asgi_app.host(f"api.{domain}", api_router)

@@ -216,7 +216,7 @@ create table scores
 		primary key,
 	map_md5 char(32) not null,
 	score int not null,
-	pp float(7,3) not null,
+	pp float(10,3) not null,
 	acc float(6,3) not null,
 	max_combo int not null,
 	mods int not null,
@@ -354,6 +354,8 @@ create table users
 	custom_badge_icon varchar(64) null,
 	userpage_content varchar(2048) charset utf8 null,
 	api_key char(36) null,
+	lb_preference enum('pp', 'score') default 'score' not null,
+	show_bancho_lb tinyint(1) default 0 not null,
 	constraint users_api_key_uindex
 		unique (api_key),
 	constraint users_email_uindex
@@ -373,7 +375,7 @@ create index users_country_index
 	on users (country);
 
 insert into users (id, name, safe_name, priv, country, silence_end, email, pw_bcrypt, creation_time, latest_activity)
-values (1, 'BanchoBot', 'banchobot', 1, 'ca', 0, 'bot@akatsuki.pw',
+values (1, 'TuyosuBot', 'tuyosubot', 1, 'jp', 0, 'bot@tuyosu.de',
         '_______________________my_cool_bcrypt_______________________', UNIX_TIMESTAMP(), UNIX_TIMESTAMP());
 
 INSERT INTO stats (id, mode) VALUES (1, 0); # vn!std

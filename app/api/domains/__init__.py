@@ -3,3 +3,4 @@
 from . import cho
 from . import map
 from . import osu
+from . import ava

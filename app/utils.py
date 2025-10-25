@@ -26,6 +26,7 @@ T = TypeVar("T")
 
 
 DATA_PATH = Path.cwd() / ".data"
+ASSETS_PATH = Path.cwd() / "assets"
 ACHIEVEMENTS_ASSETS_PATH = DATA_PATH / "assets/medals/client"
 DEFAULT_AVATAR_PATH = DATA_PATH / "avatars/default.jpg"
 

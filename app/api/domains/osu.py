@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import random
 import secrets
+import base64
+import app.usecases.performance
+from app.usecases.performance import ScoreParams
 from collections import defaultdict
 from collections.abc import Awaitable
 from collections.abc import Callable
@@ -44,6 +48,8 @@ import app.state
 import app.utils
 from app import encryption
 from app._typing import UNSET
+from app.adapters.osu_api_v1 import api_get_replay
+from app.adapters.osu_api_v1 import api_get_scores
 from app.constants import regexes
 from app.constants.clientflags import LastFMFlags
 from app.constants.gamemodes import GameMode
@@ -55,7 +61,9 @@ from app.objects import models
 from app.objects.beatmap import Beatmap
 from app.objects.beatmap import RankedStatus
 from app.objects.beatmap import ensure_osu_file_is_available
+from app.objects.player import OsuStream
 from app.objects.player import Player
+from app.objects.player import Privileges
 from app.objects.score import Grade
 from app.objects.score import Score
 from app.objects.score import SubmissionStatus
@@ -365,7 +373,7 @@ DIRECT_MAP_INFO_FMTSTR = (
 
 @router.get("/web/osu-search.php")
 async def osuSearchHandler(
-    player: Player = Depends(authenticate_player_session(Query, "u", "h")),
+    # player: Player = Depends(authenticate_player_session(Query, "u", "h")),
     ranked_status: int = Query(..., alias="r", ge=0, le=8),
     query: str = Query(..., alias="q"),
     mode: int = Query(..., alias="m", ge=-1, le=3),  # -1 for all
@@ -533,7 +541,7 @@ async def osuSubmitModularSelector(
     # through but ac'd if not found?
     # TODO: validate token format
     # TODO: save token in the database
-    token: str = Header(...),
+    token: str | None = Header(None),  # ppysb feature: none when using ppysb client
     # TODO: do ft & st contain pauses?
     exited_out: bool = Form(..., alias="x"),
     fail_time: int = Form(..., alias="ft"),
@@ -599,65 +607,6 @@ async def osuSubmitModularSelector(
     score.bmap = bmap
     score.player = player
 
-    ## perform checksum validation
-
-    unique_id1, unique_id2 = unique_ids.split("|", maxsplit=1)
-    unique_id1_md5 = hashlib.md5(unique_id1.encode()).hexdigest()
-    unique_id2_md5 = hashlib.md5(unique_id2.encode()).hexdigest()
-
-    try:
-        assert player.client_details is not None
-
-        if osu_version != f"{player.client_details.osu_version.date:%Y%m%d}":
-            raise ValueError("osu! version mismatch")
-
-        if client_hash_decoded != player.client_details.client_hash:
-            raise ValueError("client hash mismatch")
-        # assert unique ids (c1) are correct and match login params
-        if unique_id1_md5 != player.client_details.uninstall_md5:
-            raise ValueError(
-                f"unique_id1 mismatch ({unique_id1_md5} != {player.client_details.uninstall_md5})",
-            )
-
-        if unique_id2_md5 != player.client_details.disk_signature_md5:
-            raise ValueError(
-                f"unique_id2 mismatch ({unique_id2_md5} != {player.client_details.disk_signature_md5})",
-            )
-
-        # assert online checksums match
-        server_score_checksum = score.compute_online_checksum(
-            osu_version=osu_version,
-            osu_client_hash=client_hash_decoded,
-            storyboard_checksum=storyboard_md5 or "",
-        )
-        if score.client_checksum != server_score_checksum:
-            raise ValueError(
-                f"online score checksum mismatch ({server_score_checksum} != {score.client_checksum})",
-            )
-
-        # assert beatmap hashes match
-        if bmap_md5 != updated_beatmap_hash:
-            raise ValueError(
-                f"beatmap hash mismatch ({bmap_md5} != {updated_beatmap_hash})",
-            )
-
-    except (ValueError, AssertionError):
-        # NOTE: this is undergoing a temporary trial period,
-        # after which, it will be enabled & perform restrictions.
-        stacktrace = app.utils.get_appropriate_stacktrace()
-        await app.state.services.log_strange_occurrence(stacktrace)
-
-        # await player.restrict(
-        #     admin=app.state.sessions.bot,
-        #     reason="mismatching hashes on score submission",
-        # )
-
-        # refresh their client state
-        # if player.online:
-        #     player.logout()
-
-        # return b"error: ban"
-
     # we should update their activity no matter
     # what the result of the score submission is.
     score.player.update_latest_activity_soon()
@@ -668,6 +617,7 @@ async def osuSubmitModularSelector(
         score.player.status.mode = score.mode
 
         if not score.player.restricted:
+            await score.player.update_bancho_rank()
             app.state.sessions.players.enqueue(app.packets.user_stats(score.player))
 
     # hold a lock around (check if submitted, submission) to ensure no duplicates
@@ -842,13 +792,432 @@ async def osuSubmitModularSelector(
     stats = score.player.stats[score.mode]
     prev_stats = copy.copy(stats)
 
+    # recalculate stats
+    stats = await score.player.recalc_stats_sql(score.mode)
+
+    # update global & country ranking
+    stats.rank = await score.player.update_rank(score.mode)
+
+    if not score.player.restricted:
+        # enqueue new stats info to all other users
+        app.state.sessions.players.enqueue(app.packets.user_stats(score.player))
+
+        plays_incr = 1
+        passes_incr = 0
+        if score.passed:
+            passes_incr = 1
+
+        # update beatmap with new stats
+        score.bmap.plays += plays_incr
+        score.bmap.passes += passes_incr
+
+        await app.state.services.database.execute(
+            "UPDATE maps SET plays = plays + :plays_incr, passes = passes + :passes_incr WHERE md5 = :map_md5",
+            {
+                "plays_incr": plays_incr,
+                "passes_incr": passes_incr,
+                "map_md5": score.bmap.md5,
+            },
+        )
+
+    # update their recent score
+    score.player.recent_scores[score.mode] = score
+
+    """ score submission charts """
+
+    # charts are only displayed for passes vanilla gamemodes.
+    if not score.passed:  # TODO: check if this is correct
+        response = b"error: no"
+    else:
+        # construct and send achievements & ranking charts to the client
+        if score.bmap.awards_ranked_pp and not score.player.restricted:
+            unlocked_achievements: list[Achievement] = []
+
+            locked_achievements = await achievements_usecases.fetch_user_locked(user_id=score.player.id)
+
+            for server_achievement in locked_achievements:
+                achievement_condition = server_achievement["cond"]
+                if achievement_condition(score, score.mode.as_vanilla):
+                    await user_achievements_usecases.create(
+                        score.player.id,
+                        server_achievement["id"],
+                    )
+                    unlocked_achievements.append(server_achievement)
+
+            achievements_str = "/".join(
+                format_achievement_string(a["file"], a["name"], a["desc"])
+                for a in unlocked_achievements
+            )
+        else:
+            achievements_str = ""
+
+        # create score submission charts for osu! client to display
+
+        if score.prev_best:
+            beatmap_ranking_chart_entries = (
+                chart_entry("rank", score.prev_best.rank, score.rank),
+                chart_entry("rankedScore", score.prev_best.score, score.score),
+                chart_entry("totalScore", score.prev_best.score, score.score),
+                chart_entry("maxCombo", score.prev_best.max_combo, score.max_combo),
+                chart_entry(
+                    "accuracy",
+                    round(score.prev_best.acc, 2),
+                    round(score.acc, 2),
+                ),
+                chart_entry("pp", score.prev_best.pp, score.pp),
+            )
+        else:
+            # no previous best score
+            beatmap_ranking_chart_entries = (
+                chart_entry("rank", None, score.rank),
+                chart_entry("rankedScore", None, score.score),
+                chart_entry("totalScore", None, score.score),
+                chart_entry("maxCombo", None, score.max_combo),
+                chart_entry("accuracy", None, round(score.acc, 2)),
+                chart_entry("pp", None, score.pp),
+            )
+
+        overall_ranking_chart_entries = (
+            chart_entry(
+                "rank",
+                prev_stats.bancho_rank if player.show_bancho_lb else prev_stats.rank,
+                stats.bancho_rank if player.show_bancho_lb else stats.rank,
+            ),
+            chart_entry("rank", prev_stats.rank, stats.rank),
+            chart_entry("rankedScore", prev_stats.rscore, stats.rscore),
+            chart_entry("totalScore", prev_stats.tscore, stats.tscore),
+            chart_entry("maxCombo", prev_stats.max_combo, stats.max_combo),
+            chart_entry("accuracy", round(prev_stats.acc, 2), round(stats.acc, 2)),
+            chart_entry("pp", prev_stats.pp, stats.pp),
+        )
+
+        submission_charts = [
+            # beatmap info chart
+            f"beatmapId:{score.bmap.id}",
+            f"beatmapSetId:{score.bmap.set_id}",
+            f"beatmapPlaycount:{score.bmap.plays}",
+            f"beatmapPasscount:{score.bmap.passes}",
+            f"approvedDate:{score.bmap.last_update}",
+            "\n",
+            # beatmap ranking chart
+            "chartId:beatmap",
+            f"chartUrl:{score.bmap.set.url}",
+            "chartName:Beatmap Ranking",
+            *beatmap_ranking_chart_entries,
+            f"onlineScoreId:{score.id}",
+            "\n",
+            # overall ranking chart
+            "chartId:overall",
+            f"chartUrl:https://{app.settings.DOMAIN}/u/{score.player.id}",
+            "chartName:Overall Ranking",
+            *overall_ranking_chart_entries,
+            f"achievements-new:{achievements_str}",
+        ]
+
+        response = "|".join(submission_charts).encode()
+
+    log(
+        f"[{score.mode!r}] {score.player} submitted a score! "
+        f"({score.status!r}, {score.pp:,.2f}pp / {stats.pp:,}pp)",
+        Ansi.LGREEN,
+    )
+
+    return Response(response)
+
+@router.post("/web/osu-submit-modular.php")
+async def osuSubmitModular(
+    request: Request,
+    score_time: int | None = Form(None, alias="st"),
+    fail_time: int | None = Form(None, alias="ft"),
+    exited_out: bool = Form(..., alias="x"),
+    visual_settings_b64: bytes = Form(..., alias="fs"),
+    storyboard_md5: str | None = Form(None, alias="sbk"),
+    iv_b64: bytes = Form(..., alias="iv"),
+    unique_ids: str = Form(..., alias="c1"),
+    pw_md5: str = Form(..., alias="pass"),
+    osu_version: str = Form(..., alias="osuver"),
+    client_hash_b64: bytes = Form(..., alias="s"),
+) -> Response:
+    """Handle a score submission from an osu! client with an active session."""
+
+    # NOTE: the bancho protocol uses the "score" parameter name for both
+    # the base64'ed score data, and the replay file in the multipart
+    # starlette/fastapi do not support this, so we've moved it out
+    score_parameters = parse_form_data_score_params(await request.form())
+    
+    if score_parameters is None:
+        return Response(b"")
+
+    # extract the score data and replay file from the score data
+    score_data_b64, replay_file = score_parameters
+
+    # decrypt the score data (aes)
+    score_data, client_hash_decoded = encryption.decrypt_score_aes_data(
+        score_data_b64,
+        client_hash_b64,
+        iv_b64,
+        osu_version,
+    )
+
+    # fetch map & player
+
+    bmap_md5 = score_data[0]
+    bmap = await Beatmap.from_md5(bmap_md5)
+    if not bmap:
+        # Map does not exist, most likely unsubmitted.
+        return Response(b"error: beatmap")
+
+    # if the client has supporter, a space is appended
+    # but usernames may also end with a space, which must be preserved
+    username = score_data[1]
+    if username[-1] == " ":
+        username = username[:-1]
+
+    player = await app.state.sessions.players.from_login(username, pw_md5)
+    if not player:
+        # Player is not online, return nothing so that their
+        # client will retry submission when they log in.
+        return Response(b"")
+
+    # parse the score from the remaining data
+    score = Score.from_submission(score_data[2:])
+
+    # attach bmap & player
+    score.bmap = bmap
+    score.player = player
+
+    ## perform checksum validation
+
+    unique_id1, unique_id2 = unique_ids.split("|", maxsplit=1)
+    unique_id1_md5 = hashlib.md5(unique_id1.encode()).hexdigest()
+    unique_id2_md5 = hashlib.md5(unique_id2.encode()).hexdigest()
+
+    try:
+        assert player.client_details is not None
+
+        if client_hash_decoded != player.client_details.client_hash:
+            raise ValueError("client hash mismatch")
+        # assert unique ids (c1) are correct and match login params
+        if unique_id1_md5 != player.client_details.uninstall_md5:
+            raise ValueError(
+                f"unique_id1 mismatch ({unique_id1_md5} != {player.client_details.uninstall_md5})",
+            )
+
+        if unique_id2_md5 != player.client_details.disk_signature_md5:
+            raise ValueError(
+                f"unique_id2 mismatch ({unique_id2_md5} != {player.client_details.disk_signature_md5})",
+            )
+
+        # assert online checksums match
+        server_score_checksum = score.compute_online_checksum(
+            osu_version=osu_version,
+            osu_client_hash=client_hash_decoded,
+            storyboard_checksum=storyboard_md5 or "",
+        )
+        log(f'{server_score_checksum}\n{score.client_checksum}')
+        if str(score.client_checksum) != str(server_score_checksum):
+            raise ValueError(
+                f"online score checksum mismatch ({server_score_checksum} != {score.client_checksum})",
+            )
+
+        # assert beatmap hashes match
+        #if bmap_md5 != updated_beatmap_hash:
+        #    raise ValueError(
+        #        f"beatmap hash mismatch ({bmap_md5} != {updated_beatmap_hash})",
+        #    )
+
+    except (ValueError, AssertionError):
+        # NOTE: this is undergoing a temporary trial period,
+        # after which, it will be enabled & perform restrictions.
+        stacktrace = app.utils.get_appropriate_stacktrace()
+        #await app.state.services.log_strange_occurrence(stacktrace)
+
+        # await player.restrict(
+        #     admin=app.state.sessions.bot,
+        #     reason="mismatching hashes on score submission",
+        # )
+
+        # refresh their client state
+        # if player.online:
+        #     player.logout()
+
+        # return b"error: ban"
+
+    # we should update their activity no matter
+    # what the result of the score submission is.
+    score.player.update_latest_activity_soon()
+
+    # make sure the player's client displays the correct mode's stats
+    
+    if score.mode != score.player.status.mode:
+        score.player.status.mods = score.mods
+        score.player.status.mode = score.mode
+
+        if not score.player.restricted:
+            app.state.sessions.players.enqueue(app.packets.user_stats(score.player))
+
+    # stop here if this is a duplicate score
+    if await app.state.services.database.fetch_one(
+        "SELECT 1 FROM scores WHERE online_checksum = :checksum",
+        {"checksum": score.client_checksum},
+    ):
+        log(f"{score.player} submitted a duplicate score.", Ansi.LYELLOW)
+        return Response(b"error: no")
+
+    # all data read from submission.
+    # now we can calculate things based on our data.
+    score.acc = score.calculate_accuracy()
+
+    osu_file_available = await ensure_osu_file_is_available(
+        bmap.id,
+        expected_md5=bmap.md5,
+    )
+    if osu_file_available:
+        score.pp, score.sr = score.calculate_performance(bmap.id)
+
+        if score.passed:
+            await score.calculate_status()
+
+            if score.bmap.status != RankedStatus.Pending:
+                score.rank = await score.calculate_placement()
+        else:
+            score.status = SubmissionStatus.FAILED
+
+    score.time_elapsed = score_time if score.passed else fail_time
+
+    """ Score submission checks completed; submit the score. """
+
+    if app.state.services.datadog:
+        app.state.services.datadog.increment("bancho.submitted_scores")
+
+    if score.status == SubmissionStatus.BEST:
+        if app.state.services.datadog:
+            app.state.services.datadog.increment("bancho.submitted_scores_best")
+
+        if score.bmap.has_leaderboard:
+            if score.bmap.status == RankedStatus.Loved:
+                performance = f"{score.score:,} score"
+            else:
+                performance = f"{score.pp:,.2f}pp"
+
+            score.player.enqueue(
+                app.packets.notification(
+                    f"You achieved #{score.rank}! ({performance})",
+                ),
+            )
+
+            if score.rank == 1 and not score.player.restricted:
+                announce_chan = app.state.sessions.channels.get_by_name("#announce")
+
+                ann = [
+                    f"\x01ACTION achieved #1 on {score.bmap.embed}",
+                    f"with {score.acc:.2f}% for {performance}.",
+                ]
+
+                if score.mods:
+                    ann.insert(1, f"+{score.mods!r}")
+
+                scoring_metric = "pp" 
+
+                # If there was previously a score on the map, add old #1.
+                prev_n1 = await app.state.services.database.fetch_one(
+                    "SELECT u.id, name FROM users u "
+                    "INNER JOIN scores s ON u.id = s.userid "
+                    "WHERE s.map_md5 = :map_md5 AND s.mode = :mode "
+                    "AND s.status = 2 AND u.priv & 1 "
+                    f"ORDER BY s.{scoring_metric} DESC LIMIT 1",
+                    {"map_md5": score.bmap.md5, "mode": score.mode},
+                )
+
+                top_pp = await app.state.services.database.fetch_one(
+                    'select max(pp) as h from scores where mode = :mode and status = 2',
+                    {"mode": score.mode},
+                )
+
+                assert announce_chan is not None
+                announce_chan.send(" ".join(ann), sender=score.player, to_self=True)
+
+        # this score is our best score.
+        # update any preexisting personal best
+        # records with SubmissionStatus.SUBMITTED.
+        await app.state.services.database.execute(
+            "UPDATE scores SET status = 1 "
+            "WHERE status = 2 AND map_md5 = :map_md5 "
+            "AND userid = :user_id AND mode = :mode",
+            {
+                "map_md5": score.bmap.md5,
+                "user_id": score.player.id,
+                "mode": score.mode,
+            },
+        )
+
+    score.id = await app.state.services.database.execute(
+        "INSERT INTO scores "
+        "VALUES (NULL, "
+        ":map_md5, :score, :pp, :acc, "
+        ":max_combo, :mods, :n300, :n100, "
+        ":n50, :nmiss, :ngeki, :nkatu, "
+        ":grade, :status, :mode, :play_time, "
+        ":time_elapsed, :client_flags, :user_id, :perfect, "
+        ":checksum)",  
+        {
+            "map_md5": score.bmap.md5,
+            "score": score.score,
+            "pp": score.pp,
+            "acc": score.acc,
+            "max_combo": score.max_combo,
+            "mods": score.mods,
+            "n300": score.n300,
+            "n100": score.n100,
+            "n50": score.n50,
+            "nmiss": score.nmiss,
+            "ngeki": score.ngeki,
+            "nkatu": score.nkatu,
+            "grade": score.grade.name,
+            "status": score.status,
+            "mode": score.mode,
+            "play_time": score.server_time,
+            "time_elapsed": bmap.total_length,
+            "client_flags": score.client_flags,
+            "user_id": score.player.id,
+            "perfect": score.perfect,
+            "checksum": score.client_checksum,
+        },
+    )
+
+    if score.passed:
+        replay_data = await replay_file.read()
+
+        MIN_REPLAY_SIZE = 24
+
+        if len(replay_data) >= MIN_REPLAY_SIZE:
+            replay_disk_file = REPLAYS_PATH / f"{score.id}.osr"
+            replay_disk_file.write_bytes(replay_data)
+        else:
+            log(f"{score.player} submitted a score without a replay!", Ansi.LRED)
+
+            if not score.player.restricted:
+                await score.player.restrict(
+                    admin=app.state.sessions.bot,
+                    reason="you submitted a score without a replay! what are you trying to pull?",
+                )
+                if score.player.is_online:
+                    score.player.logout()
+
+    """ Update the user's & beatmap's stats """
+    # get the current stats, and take a
+    # shallow copy for the response charts.
+    # stats = score.player.gm_stats
+    stats = score.player.stats[score.mode] # https://github.com/osuAkatsuki/bancho.py/commit/2748ff8e1aec59157f0907ca6534db55e2c4b54a
+    prev_stats = copy.copy(stats)
+
     # stuff update for all submitted scores
-    stats.playtime += score.time_elapsed // 1000
+    stats.playtime += bmap.total_length
     stats.plays += 1
     stats.tscore += score.score
     stats.total_hits += score.n300 + score.n100 + score.n50
 
-    if score.mode.as_vanilla in (1, 3):
+    if score.mode in (1, 3) or score.mode in (5, 7):
         # taiko uses geki & katu for hitting big notes with 2 keys
         # mania uses geki & katu for rainbow 300 & 200
         stats.total_hits += score.ngeki + score.nkatu
@@ -921,7 +1290,9 @@ async def osuSubmitModularSelector(
             stats_updates["acc"] = stats.acc
 
             # calculate new total weighted pp
-            weighted_pp = sum(row["pp"] * 0.95**i for i, row in enumerate(best_scores))
+            weighted_pp = sum(
+                row["pp"] * 0.95**i for i, row in enumerate(best_scores)
+            )
             bonus_pp = 416.6667 * (1 - 0.9994 ** len(best_scores))
             stats.pp = round(weighted_pp + bonus_pp)
             stats_updates["pp"] = stats.pp
@@ -931,7 +1302,7 @@ async def osuSubmitModularSelector(
 
     await stats_repo.partial_update(
         score.player.id,
-        score.mode.value,
+        score.mode,
         plays=stats_updates.get("plays", UNSET),
         playtime=stats_updates.get("playtime", UNSET),
         tscore=stats_updates.get("tscore", UNSET),
@@ -970,8 +1341,13 @@ async def osuSubmitModularSelector(
 
     """ score submission charts """
 
-    # charts are only displayed for passes vanilla gamemodes.
-    if not score.passed:  # TODO: check if this is correct
+    # charts are only displayed for scores on relax/vanilla
+    if not score.passed or score.mode not in (
+        GameMode.VANILLA_OSU,
+        GameMode.VANILLA_TAIKO,
+        GameMode.VANILLA_CATCH,
+        GameMode.VANILLA_MANIA,
+    ):
         response = b"error: no"
     else:
         # construct and send achievements & ranking charts to the client
@@ -980,7 +1356,7 @@ async def osuSubmitModularSelector(
 
             server_achievements = await achievements_usecases.fetch_many()
             player_achievements = await user_achievements_usecases.fetch_many(
-                user_id=score.player.id,
+                score.player.id,
             )
 
             for server_achievement in server_achievements:
@@ -994,7 +1370,7 @@ async def osuSubmitModularSelector(
                     continue
 
                 achievement_condition = server_achievement["cond"]
-                if achievement_condition(score, score.mode.as_vanilla):
+                if achievement_condition(score, score.mode):
                     await user_achievements_usecases.create(
                         score.player.id,
                         server_achievement["id"],
@@ -1026,15 +1402,20 @@ async def osuSubmitModularSelector(
         else:
             # no previous best score
             beatmap_ranking_chart_entries = (
-                chart_entry("rank", None, score.rank),
-                chart_entry("rankedScore", None, score.score),
-                chart_entry("totalScore", None, score.score),
-                chart_entry("maxCombo", None, score.max_combo),
-                chart_entry("accuracy", None, round(score.acc, 2)),
-                chart_entry("pp", None, score.pp),
+                chart_entry("rank", 0, score.rank),
+                chart_entry("rankedScore", 0, score.score),
+                chart_entry("totalScore", 0, score.score),
+                chart_entry("maxCombo", 0, score.max_combo),
+                chart_entry("accuracy", 0, round(score.acc, 2)),
+                chart_entry("pp", 0, score.pp),
             )
 
         overall_ranking_chart_entries = (
+            chart_entry(
+                "rank",
+                prev_stats.bancho_rank if player.show_bancho_lb else prev_stats.rank,
+                stats.bancho_rank if player.show_bancho_lb else stats.rank,
+            ),
             chart_entry("rank", prev_stats.rank, stats.rank),
             chart_entry("rankedScore", prev_stats.rscore, stats.rscore),
             chart_entry("totalScore", prev_stats.tscore, stats.tscore),
@@ -1042,6 +1423,8 @@ async def osuSubmitModularSelector(
             chart_entry("accuracy", round(prev_stats.acc, 2), round(stats.acc, 2)),
             chart_entry("pp", prev_stats.pp, stats.pp),
         )
+
+        log(f'ach str: {achievements_str}')
 
         submission_charts = [
             # beatmap info chart
@@ -1053,7 +1436,7 @@ async def osuSubmitModularSelector(
             "\n",
             # beatmap ranking chart
             "chartId:beatmap",
-            f"chartUrl:{score.bmap.set.url}",
+            f"chartUrl:https://refx.online/s/{score.bmap.set_id}",
             "chartName:Beatmap Ranking",
             *beatmap_ranking_chart_entries,
             f"onlineScoreId:{score.id}",
@@ -1076,7 +1459,6 @@ async def osuSubmitModularSelector(
 
     return Response(response)
 
-
 @router.get("/web/osu-getreplay.php")
 async def getReplay(
     player: Player = Depends(authenticate_player_session(Query, "u", "h")),
@@ -1084,18 +1466,35 @@ async def getReplay(
     score_id: int = Query(..., alias="c", min=0, max=9_223_372_036_854_775_807),
 ) -> Response:
     score = await Score.from_sql(score_id)
-    if not score:
+
+    if score and score.player is not None and score.player.id == player.id:
+        replay = app.state.services.storage.get_replay_file(score_id)
+        if replay:
+            return Response(replay)
         return Response(b"", status_code=404)
+    if player.show_bancho_lb:
+        api_data = await api_get_replay(score_id, mode)
+        if api_data["data"]:
+            api_response = api_data["data"]
 
-    file = REPLAYS_PATH / f"{score_id}.osr"
-    if not file.exists():
-        return Response(b"", status_code=404)
-
-    # increment replay views for this score
-    if score.player is not None and player.id != score.player.id:
-        app.state.loop.create_task(score.increment_replay_views())  # type: ignore[unused-awaitable]
-
-    return FileResponse(file)
+            if (
+                "error" in api_response
+                and api_response["error"] == "Replay not available."
+            ):
+                return Response(b"", status_code=404)
+        
+        replay = base64.b64decode(api_response["content"])
+        log(f"Successfully got Bancho replay: {replay}")
+        return Response(replay)
+    
+    if score:
+        replay = app.state.services.storage.get_replay_file(score_id)
+        if replay:
+            if score.player is not None and player.id != score.player.id:
+                app.state.loop.create_task(score.increment_replay_views())
+            return Response(replay)
+    
+    return Response(b"", status_code=404)
 
 
 @router.get("/web/osu-rate.php")
@@ -1127,11 +1526,8 @@ async def osuRate(
         # the client is submitting a rating for the map.
         await ratings_repo.create(userid=player.id, map_md5=map_md5, rating=rating)
 
-    map_ratings = await ratings_repo.fetch_many(map_md5=map_md5)
-    ratings = [row["rating"] for row in map_ratings]
-
     # send back the average rating
-    avg = sum(ratings) / len(ratings)
+    avg = await ratings_repo.get_map_rating(map_md5=map_md5)
     return Response(f"alreadyvoted\n{avg}".encode())
 
 
@@ -1147,84 +1543,198 @@ class LeaderboardType(IntEnum):
 
 async def get_leaderboard_scores(
     leaderboard_type: LeaderboardType | int,
-    map_md5: str,
+    map: Beatmap,
     mode: int,
     mods: Mods,
     player: Player,
     scoring_metric: Literal["pp", "score"],
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    query = [
-        f"SELECT s.id, s.{scoring_metric} AS _score, "
-        "s.max_combo, s.n50, s.n100, s.n300, "
-        "s.nmiss, s.nkatu, s.ngeki, s.perfect, s.mods, "
-        "UNIX_TIMESTAMP(s.play_time) time, u.id userid, "
-        "COALESCE(CONCAT('[', c.tag, '] ', u.name), u.name) AS name "
-        "FROM scores s "
-        "INNER JOIN users u ON u.id = s.userid "
-        "LEFT JOIN clans c ON c.id = u.clan_id "
-        "WHERE s.map_md5 = :map_md5 AND s.status = 2 "  # 2: =best score
-        "AND (u.priv & 1 OR u.id = :user_id) AND mode = :mode",
-    ]
+    if player.show_bancho_lb:
+        if leaderboard_type == LeaderboardType.Mods:
+            bancho_scores = (
+                await api_get_scores(scoring_metric, b=map.id, m=mode, mods=mods.value)
+                or []
+            )
+        elif leaderboard_type in [LeaderboardType.Friends, LeaderboardType.Country]:
+            bancho_scores = []
+        else:
+            if (mods.value & Mods.RELAX) or (mods.value & Mods.AUTOPILOT):
+                bancho_scores = []
+            else:
+                bancho_scores = (
+                    await api_get_scores(scoring_metric, b=map.id, m=mode) or []
+                )
 
-    params: dict[str, Any] = {
-        "map_md5": map_md5,
-        "user_id": player.id,
-        "mode": mode,
-    }
+        query = [
+            f"SELECT s.id, s.{scoring_metric} AS _score, "
+            "s.max_combo, s.n50, s.n100, s.n300, "
+            "s.nmiss, s.nkatu, s.ngeki, s.perfect, s.mods, "
+            "UNIX_TIMESTAMP(s.play_time) time, u.id userid, "
+            "COALESCE(CONCAT('[', c.tag, '] ', u.name), u.name) AS name "
+            "FROM scores s "
+            "INNER JOIN users u ON u.id = s.userid "
+            "LEFT JOIN clans c ON c.id = u.clan_id "
+            "WHERE s.map_md5 = :map_md5 AND s.status = 2 "
+            "AND (u.priv & 1 OR u.id = :user_id) AND mode = :mode",
+        ]
 
-    if leaderboard_type == LeaderboardType.Mods:
-        query.append("AND s.mods = :mods")
-        params["mods"] = mods
-    elif leaderboard_type == LeaderboardType.Friends:
-        query.append("AND s.userid IN :friends")
-        params["friends"] = player.friends | {player.id}
-    elif leaderboard_type == LeaderboardType.Country:
-        query.append("AND u.country = :country")
-        params["country"] = player.geoloc["country"]["acronym"]
+        params: dict[str, Any] = {
+            "map_md5": map.md5,
+            "user_id": player.id,
+            "mode": mode,
+        }
 
-    # TODO: customizability of the number of scores
-    query.append("ORDER BY _score DESC LIMIT 50")
+        if leaderboard_type == LeaderboardType.Mods:
+            query.append("AND s.mods = :mods")
+            params["mods"] = mods
+        elif leaderboard_type == LeaderboardType.Friends:
+            query.append("AND s.userid IN :friends")
+            params["friends"] = player.friends | {player.id}
+        elif leaderboard_type == LeaderboardType.Country:
+            query.append("AND u.country = :country")
+            params["country"] = player.geoloc["country"]["acronym"]
 
-    score_rows = await app.state.services.database.fetch_all(
-        " ".join(query),
-        params,
-    )
+        query.append("ORDER BY _score DESC LIMIT 50")
 
-    if score_rows:  # None or []
-        # fetch player's personal best score
+        local_scores = (
+            await app.state.services.database.fetch_all(
+                " ".join(query),
+                params,
+            )
+            or []
+        )
+
+        # merge and sort scores
+        score_rows = sorted(
+            bancho_scores + local_scores,
+            key=lambda x: (-x["_score"], x["time"]),
+        )[:50]
+
+        query = [
+            f"SELECT s.id, s.{scoring_metric} AS _score, "
+            "s.max_combo, s.n50, s.n100, s.n300, "
+            "s.nmiss, s.nkatu, s.ngeki, s.perfect, s.mods, "
+            "UNIX_TIMESTAMP(s.play_time) time, u.id userid, u.name name "
+            "FROM scores s "
+            "INNER JOIN users u ON u.id = s.userid "
+            "WHERE s.map_md5 = :map_md5 AND s.mode = :mode "
+            "AND s.userid = :user_id AND s.status = 2",
+        ]
+
+        params: dict[str, Any] = {
+            "map_md5": map.md5,
+            "mode": mode,
+            "user_id": player.id,
+        }
+
+        if leaderboard_type == LeaderboardType.Mods:
+            query.append("AND s.mods = :mods")
+            params["mods"] = mods
+
+        query.append("ORDER BY _score DESC LIMIT 1")
+
         personal_best_score_row = await app.state.services.database.fetch_one(
-            f"SELECT id, {scoring_metric} AS _score, "
-            "max_combo, n50, n100, n300, "
-            "nmiss, nkatu, ngeki, perfect, mods, "
-            "UNIX_TIMESTAMP(play_time) time "
-            "FROM scores "
-            "WHERE map_md5 = :map_md5 AND mode = :mode "
-            "AND userid = :user_id AND status = 2 "
-            "ORDER BY _score DESC LIMIT 1",
-            {"map_md5": map_md5, "mode": mode, "user_id": player.id},
+            " ".join(query),
+            params,
         )
 
         if personal_best_score_row is not None:
-            # calculate the rank of the score.
-            p_best_rank = 1 + await app.state.services.database.fetch_val(
-                "SELECT COUNT(*) FROM scores s "
-                "INNER JOIN users u ON u.id = s.userid "
-                "WHERE s.map_md5 = :map_md5 AND s.mode = :mode "
-                "AND s.status = 2 AND u.priv & 1 "
-                f"AND s.{scoring_metric} > :score",
-                {
-                    "map_md5": map_md5,
-                    "mode": mode,
-                    "score": personal_best_score_row["_score"],
-                },
-                column=0,  # COUNT(*)
+            personal_best_score_row["rank"] = 1 + sum(
+                1
+                for score in score_rows
+                if score["_score"] > personal_best_score_row["_score"]
+                or (
+                    score["_score"] == personal_best_score_row["_score"]
+                    and score["time"] < personal_best_score_row["time"]
+                )
             )
 
-            # attach rank to personal best row
-            personal_best_score_row["rank"] = p_best_rank
+            personal_best_score_row.pop("name")
+            personal_best_score_row.pop("userid")
+
     else:
-        score_rows = []
-        personal_best_score_row = None
+        query = [
+            f"SELECT s.id, s.{scoring_metric} AS _score, "
+            "s.max_combo, s.n50, s.n100, s.n300, "
+            "s.nmiss, s.nkatu, s.ngeki, s.perfect, s.mods, "
+            "UNIX_TIMESTAMP(s.play_time) time, u.id userid, "
+            "COALESCE(CONCAT('[', c.tag, '] ', u.name), u.name) AS name "
+            "FROM scores s "
+            "INNER JOIN users u ON u.id = s.userid "
+            "LEFT JOIN clans c ON c.id = u.clan_id "
+            "WHERE s.map_md5 = :map_md5 AND s.status = 2 "  # 2: =best score
+            "AND (u.priv & 1 OR u.id = :user_id) AND mode = :mode",
+        ]
+
+        params: dict[str, Any] = {
+            "map_md5": map.md5,
+            "user_id": player.id,
+            "mode": mode,
+        }
+
+        if leaderboard_type == LeaderboardType.Mods:
+            query.append("AND s.mods = :mods")
+            params["mods"] = mods
+        elif leaderboard_type == LeaderboardType.Friends:
+            query.append("AND s.userid IN :friends")
+            params["friends"] = player.friends | {player.id}
+        elif leaderboard_type == LeaderboardType.Country:
+            query.append("AND u.country = :country")
+            params["country"] = player.geoloc["country"]["acronym"]
+
+        # TODO: customizability of the number of scores
+        query.append("ORDER BY _score DESC LIMIT 50")
+
+        score_rows = (
+            await app.state.services.database.fetch_all(
+                " ".join(query),
+                params,
+            )
+            or []
+        )
+
+        if score_rows:  # None or []
+            # fetch player's personal best score
+            personal_best_score_row = await app.state.services.database.fetch_one(
+                f"SELECT id, {scoring_metric} AS _score, "
+                "max_combo, n50, n100, n300, "
+                "nmiss, nkatu, ngeki, perfect, mods, "
+                "UNIX_TIMESTAMP(play_time) time "
+                "FROM scores "
+                "WHERE map_md5 = :map_md5 AND mode = :mode "
+                "AND userid = :user_id AND status = 2 "
+                "ORDER BY _score DESC LIMIT 1",
+                {"map_md5": map.md5, "mode": mode, "user_id": player.id},
+            )
+
+            if personal_best_score_row is not None:
+                # calculate the rank of the score.
+                p_best_rank = 1 + await app.state.services.database.fetch_val(
+                    "SELECT COUNT(*) FROM scores s "
+                    "INNER JOIN users u ON u.id = s.userid "
+                    "WHERE s.map_md5 = :map_md5 AND s.mode = :mode "
+                    "AND s.status = 2 AND u.priv & 1 "
+                    f"AND s.{scoring_metric} > :score",
+                    {
+                        "map_md5": map.md5,
+                        "mode": mode,
+                        "score": personal_best_score_row["_score"],
+                    },
+                    column=0,  # COUNT(*)
+                )
+
+                # attach rank to personal best row
+                personal_best_score_row["rank"] = p_best_rank
+        else:
+            score_rows = []
+            personal_best_score_row = None
+
+    is_streaming = app.state.sessions.streaming_players.get(player.id, False)
+    if is_streaming:
+        for score in score_rows:
+            # we replaced the username with that user's userid, also, return a fake userid to hide avatar.
+            score['name'] = f"Player{str(score['userid'])}"
+            score['userid'] = -1     
 
     return score_rows, personal_best_score_row
 
@@ -1338,17 +1848,21 @@ async def getScores(
     if app.state.services.datadog:
         app.state.services.datadog.increment("bancho.leaderboards_served")  # type: ignore[no-untyped-call]
 
-    if bmap.status < RankedStatus.Ranked:
-        # only show leaderboards for ranked,
-        # approved, qualified, or loved maps.
-        return Response(f"{int(bmap.status)}|false".encode())
+    ### ppysb feature begin
+
+    # if bmap.status < RankedStatus.Ranked:
+    # only show leaderboards for ranked,
+    # approved, qualified, or loved maps.
+    # return f"{int(bmap.status)}|false".encode()
+
+    ### ppysb feature end
 
     # fetch scores & personal best
     # TODO: create a leaderboard cache
     if not requesting_from_editor_song_select:
         score_rows, personal_best_score_row = await get_leaderboard_scores(
             leaderboard_type,
-            bmap.md5,
+            bmap,
             mode,
             mods,
             player,
@@ -1359,24 +1873,26 @@ async def getScores(
         personal_best_score_row = None
 
     # fetch beatmap rating
-    map_ratings = await ratings_repo.fetch_many(
-        map_md5=bmap.md5,
-        page=None,
-        page_size=None,
-    )
-    ratings = [row["rating"] for row in map_ratings]
-    map_avg_rating = sum(ratings) / len(ratings) if ratings else 0.0
+    map_avg_rating = await ratings_repo.get_map_rating(map_md5=map_md5)
 
     ## construct response for osu! client
+
+    ### ppysb feature begin
+
+    response_status = bmap.status
+    if bmap.status < RankedStatus.Ranked:
+        response_status = RankedStatus.Approved
 
     response_lines: list[str] = [
         # NOTE: fa stands for featured artist (for the ones that may not know)
         # {ranked_status}|{serv_has_osz2}|{bid}|{bsid}|{len(scores)}|{fa_track_id}|{fa_license_text}
-        f"{int(bmap.status)}|false|{bmap.id}|{bmap.set_id}|{len(score_rows)}|0|",
+        f"{int(response_status)}|false|{bmap.id}|{bmap.set_id}|{len(score_rows)}|0|",
         # {offset}\n{beatmap_name}\n{rating}
         # TODO: server side beatmap offsets
         f"0\n{bmap.full_name}\n{map_avg_rating}",
     ]
+
+    ### ppysb feature end
 
     if not score_rows:
         response_lines.extend(("", ""))  # no scores, no personal best
@@ -1603,8 +2119,29 @@ async def get_screenshot(
     )
 
 
+geo_cache: dict = {}
+
+
+async def get_osz_url(
+    headers: Mapping[str, str], beatmapset_id: str, no_video: bool
+) -> str:
+    ip_address = app.state.services.ip_resolver.get_ip(headers)
+    geo_country = geo_cache.get(ip_address)
+    if not geo_country:
+        geoloc = await app.state.services.fetch_geoloc(ip_address, headers)
+        if geoloc:
+            geo_country = geoloc["country"]["acronym"]
+            geo_cache[ip_address] = geo_country
+    if geo_country == "cn":
+        prefix = "novideo" if no_video else "full"
+        return f"https://dl.sayobot.cn/beatmaps/download/{prefix}/{beatmapset_id}"
+    query_str = f"{beatmapset_id}?n={int(not no_video)}"
+    return f"{app.settings.MIRROR_DOWNLOAD_ENDPOINT}/{query_str}"
+
+
 @router.get("/d/{map_set_id}")
 async def get_osz(
+    request: Request,
     map_set_id: str = Path(...),
 ) -> Response:
     """Handle a map download request (osu.ppy.sh/d/*)."""
@@ -1612,10 +2149,8 @@ async def get_osz(
     if no_video:
         map_set_id = map_set_id[:-1]
 
-    query_str = f"{map_set_id}?n={int(not no_video)}"
-
     return RedirectResponse(
-        url=f"{app.settings.MIRROR_DOWNLOAD_ENDPOINT}/{query_str}",
+        url=await get_osz_url(request.headers, map_set_id, no_video),
         status_code=status.HTTP_301_MOVED_PERMANENTLY,
     )
 

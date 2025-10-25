@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import struct
-from pathlib import Path as SystemPath
 from typing import Literal
 
 from fastapi import APIRouter
@@ -19,6 +18,7 @@ from fastapi.security import HTTPBearer
 import app.packets
 import app.state
 import app.usecases.performance
+from app import utils
 from app.constants import regexes
 from app.constants.gamemodes import GameMode
 from app.constants.mods import Mods
@@ -31,12 +31,6 @@ from app.repositories import tourney_pool_maps as tourney_pool_maps_repo
 from app.repositories import tourney_pools as tourney_pools_repo
 from app.repositories import users as users_repo
 from app.usecases.performance import ScoreParams
-
-AVATARS_PATH = SystemPath.cwd() / ".data/avatars"
-BEATMAPS_PATH = SystemPath.cwd() / ".data/osu"
-REPLAYS_PATH = SystemPath.cwd() / ".data/osr"
-SCREENSHOTS_PATH = SystemPath.cwd() / ".data/ss"
-
 
 router = APIRouter()
 http_bearer_scheme = HTTPBearer(auto_error=False)
@@ -125,8 +119,8 @@ async def api_calculate_pp(
         )
 
     results = app.usecases.performance.calculate_performances(
-        str(BEATMAPS_PATH / f"{beatmap.id}.osu"),
-        scores,
+        osu_file=app.state.services.storage.get_beatmap_file(beatmap.id),
+        scores=scores,
     )
 
     # "Inject" the accuracy into the list of results
@@ -334,7 +328,7 @@ async def api_get_player_status(
 
 @router.get("/get_player_scores")
 async def api_get_player_scores(
-    scope: Literal["recent", "best"],
+    scope: Literal["recent", "best", "first"],
     user_id: int | None = Query(None, alias="id", ge=3, le=2_147_483_647),
     username: str | None = Query(None, alias="name", pattern=regexes.USERNAME.pattern),
     mods_arg: str | None = Query(None, alias="mods"),
@@ -343,7 +337,7 @@ async def api_get_player_scores(
     include_loved: bool = False,
     include_failed: bool = True,
 ) -> Response:
-    """Return a list of a given user's recent/best scores."""
+    """Return a list of a given user's recent/best/first scores."""
     if mode_arg in (
         GameMode.RELAX_MANIA,
         GameMode.AUTOPILOT_CATCH,
@@ -429,10 +423,23 @@ async def api_get_player_scores(
         query.append("AND t.status = 2 AND b.status IN :statuses")
         params["statuses"] = allowed_statuses
         sort = "t.pp"
-    else:
+    elif scope == "recent":
         if not include_failed:
             query.append("AND t.status != 0")
 
+        sort = "t.play_time"
+    else: # "first"
+        lb_sort = "score" if mode_arg <= 3 else "pp" # vanilla goes by score, relax and ap by pp
+        query = [
+            "SELECT t.id, t.map_md5, t.score, t.pp, t.acc, t.max_combo, "
+            "t.mods, t.n300, t.n100, t.n50, t.nmiss, t.ngeki, t.nkatu, t.grade, "
+            "t.status, t.mode, t.time_elapsed, t.play_time, t.perfect "
+            "FROM scores t "
+           f"JOIN (SELECT map_md5, MAX({lb_sort}) AS points FROM scores WHERE status = 2 GROUP BY map_md5) max_scores "
+           f"ON t.map_md5 = max_scores.map_md5 AND t.{lb_sort} = max_scores.points "
+            "INNER JOIN maps b ON max_scores.map_md5 = b.md5 "
+            "WHERE t.userid = :user_id AND t.mode = :mode AND t.status = 2 AND b.status IN (2, 3, 5)"
+        ]
         sort = "t.play_time"
 
     query.append(f"ORDER BY {sort} DESC LIMIT :limit")
@@ -445,8 +452,10 @@ async def api_get_player_scores(
 
     # fetch & return info from sql
     for row in rows:
+        mods = Mods(row["mods"])
         bmap = await Beatmap.from_md5(row.pop("map_md5"))
         row["beatmap"] = bmap.as_dict if bmap else None
+        row["mods_readable"] = mods.__repr__()
 
     clan: clans_repo.Clan | None = None
     if player.clan_id:
@@ -472,6 +481,16 @@ async def api_get_player_scores(
             "scores": rows,
             "player": player_info,
         },
+    )
+
+
+@router.get("/aggregate_pp_stats")
+async def aggregate_pp_stats(
+    status: int | None = Query(None, alias="status", ge=0, le=2),
+) -> Response:
+    """Return the aggregate pp stats of the server."""
+    return ORJSONResponse(
+        {"status": "success", "stats": await scores_repo.aggregate_pp_stats(status)},
     )
 
 
@@ -624,7 +643,7 @@ async def api_get_map_scores(
         mods = None
 
     query = [
-        "SELECT s.map_md5, s.score, s.pp, s.acc, s.max_combo, s.mods, "
+        "SELECT s.map_md5, s.id, s.score, s.pp, s.acc, s.max_combo, s.mods, "
         "s.n300, s.n100, s.n50, s.nmiss, s.ngeki, s.nkatu, s.grade, s.status, "
         "s.mode, s.play_time, s.time_elapsed, s.userid, s.perfect, "
         "u.name player_name, u.country player_country, "
@@ -698,17 +717,15 @@ async def api_get_replay(
     the player's total replay views.
     """
     # fetch replay file & make sure it exists
-    replay_file = REPLAYS_PATH / f"{score_id}.osr"
-    if not replay_file.exists():
+    replay_file = app.state.services.storage.get_replay_file(score_id)
+    if not replay_file:
         return ORJSONResponse(
             {"status": "Replay not found."},
             status_code=status.HTTP_404_NOT_FOUND,
         )
-    # read replay frames from file
-    raw_replay_data = replay_file.read_bytes()
     if not include_headers:
         return Response(
-            bytes(raw_replay_data),
+            replay_file,
             media_type="application/octet-stream",
             headers={
                 "Content-Description": "File Transfer",
@@ -718,7 +735,7 @@ async def api_get_replay(
     # add replay headers from sql
     # TODO: osu_version & life graph in scores tables?
     row = await app.state.services.database.fetch_one(
-        "SELECT u.name username, m.md5 map_md5, "
+        "SELECT u.name username, m.id, m.md5 map_md5, "
         "m.artist, m.title, m.version, "
         "s.mode, s.n300, s.n100, s.n50, s.ngeki, "
         "s.nkatu, s.nmiss, s.score, s.max_combo, "
@@ -781,23 +798,23 @@ async def api_get_replay(
     timestamp = int(row["play_time"].timestamp() * 1e7)
     replay_data += struct.pack("<q", timestamp + DATETIME_OFFSET)
     # pack the raw replay data into the buffer
-    replay_data += struct.pack("<i", len(raw_replay_data))
-    replay_data += raw_replay_data
+    replay_data += struct.pack("<i", len(replay_file))
+    replay_data += replay_file
     # pack additional info buffer.
     replay_data += struct.pack("<q", score_id)
     # NOTE: target practice sends extra mods, but
     # can't submit scores so should not be a problem.
     # stream data back to the client
+
+    game_mode_str = utils.get_replay_mode_name(GameMode(row["mode"]).as_vanilla)
+    filename = f"replay-{game_mode_str}_{row['id']}_{score_id}.osr"
+
     return Response(
         bytes(replay_data),
         media_type="application/octet-stream",
         headers={
             "Content-Description": "File Transfer",
-            "Content-Disposition": (
-                'attachment; filename="{username} - '
-                "{artist} - {title} [{version}] "
-                '({play_time:%Y-%m-%d}).osr"'
-            ).format(**row),
+            "Content-Disposition": (f"attachment; filename={filename}").format(**row),
         },
     )
 
@@ -855,7 +872,7 @@ async def api_get_global_leaderboard(
     sort: Literal["tscore", "rscore", "pp", "acc", "plays", "playtime"] = "pp",
     mode_arg: int = Query(0, alias="mode", ge=0, le=11),
     limit: int = Query(50, ge=1, le=100),
-    offset: int = Query(0, min=0, max=2_147_483_647),
+    page: int = Query(1, min=0, max=2_147_483_647),
     country: str | None = Query(None, min_length=2, max_length=2),
 ) -> Response:
     if mode_arg in (
@@ -888,7 +905,7 @@ async def api_get_global_leaderboard(
         "LEFT JOIN clans c ON u.clan_id = c.id "
         f"WHERE {' AND '.join(query_conditions)} "
         f"ORDER BY s.{sort} DESC LIMIT :offset, :limit",
-        query_parameters | {"offset": offset, "limit": limit},
+        query_parameters | {"offset": (page - 1) * limit, "limit": limit},
     )
 
     return ORJSONResponse(
