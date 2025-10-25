@@ -16,8 +16,8 @@ from typing import Any
 from typing import TypeVar
 
 import databases
-from rosu_pp_py import Beatmap
-from rosu_pp_py import Performance
+from akatsuki_pp_py import Beatmap
+from akatsuki_pp_py import Calculator
 from redis import asyncio as aioredis
 
 sys.path.insert(0, os.path.abspath(os.pardir))
@@ -65,7 +65,8 @@ async def recalculate_score(
             beatmap = Beatmap(path=str(beatmap_path))
             ctx.beatmaps[score["map_id"]] = beatmap
 
-        calculator = Performance(
+        calculator = Calculator(
+            mode=GameMode(score["mode"]).as_vanilla,
             mods=score["mods"],
             combo=score["max_combo"],
             n_geki=score["ngeki"],  # Mania 320s
@@ -73,9 +74,9 @@ async def recalculate_score(
             n_katu=score["nkatu"],  # Mania 200s, Catch tiny droplets
             n100=score["n100"],
             n50=score["n50"],
-            misses=score["nmiss"],
+            n_misses=score["nmiss"],
         )
-        attrs = calculator.calculate(beatmap)
+        attrs = calculator.performance(beatmap)
 
         new_pp: float = attrs.pp
         if math.isnan(new_pp) or math.isinf(new_pp):
