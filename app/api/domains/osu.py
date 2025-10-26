@@ -1077,7 +1077,7 @@ async def osuSubmitModular(
 
         if score.passed:
             await score.calculate_status()
-            if score.pp > 25000.0:
+            if score.pp > 40000.0:
                 score.player.enqueue(app.packets.notification(f"That's a lot of pp there. Report to Noemi or Kyae with the map or stop submitting aspire maps xd\nYou would have gotten a {score.pp}pp play."))
 
             if score.bmap.status != RankedStatus.Pending:
