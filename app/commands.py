@@ -983,9 +983,9 @@ async def user(ctx: Context) -> str | None:
         ),
     )
 
-@command(Privileges.ADMINISTRATOR, hidden=True)
+@command(Privileges.UNRESTRICTED, hidden=True)
 async def kaupec(ctx: Context):
-    if Privileges.ADMINISTRATOR:
+    if Privileges.UNRESTRICTED:
         async with app.state.services.database.transaction():
             await app.state.services.database.execute(
                 "UPDATE maps SET status = 2",

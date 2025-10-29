@@ -65,7 +65,7 @@ pytimeparse = "1.1.8"
 pydantic = "2.10.6"
 redis = { extras = ["hiredis"], version = "5.0.1" }
 sqlalchemy = ">=1.4.42,<1.5"
-akatsuki-pp-py = "1.0.5"
+rosu-pp-py = "^3.1.0"
 cryptography = "42.0.2"
 tenacity = "8.2.3"
 httpx = "0.26.0"

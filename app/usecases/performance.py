@@ -106,6 +106,8 @@ def calculate_performances(
         result = calculator.performance(calc_bmap)
 
         pp = result.pp
+        CUSTOM_PP_MULTIPLIER = 1.5
+        pp = pp * CUSTOM_PP_MULTIPLIER
 
         if math.isnan(pp) or math.isinf(pp):
             # TODO: report to logserver

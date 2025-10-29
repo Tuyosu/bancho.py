@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import StrEnum
+from enum import Enum
+
+class StrEnum(str, Enum):
+    pass
 from typing import TypedDict
 from typing import cast
 from typing import Literal

@@ -6,7 +6,10 @@ import uuid
 from dataclasses import dataclass
 from datetime import date
 from enum import IntEnum
-from enum import StrEnum
+from enum import Enum
+
+class StrEnum(str, Enum):
+    pass
 from enum import unique
 from functools import cached_property
 from typing import TYPE_CHECKING

@@ -1,6 +1,9 @@
 
 from datetime import datetime
-from enum import StrEnum
+from enum import Enum
+
+class StrEnum(str, Enum):
+    pass
 import json
 from typing import TypedDict, cast
 import app
