@@ -45,6 +45,7 @@ http_bearer_scheme = HTTPBearer(auto_error=False)
 # GET /get_player_status: return a player's current status, if online.
 # GET /get_player_scores: return a list of best or recent scores for a given player.
 # GET /get_player_most_played: return a list of maps most played by a given player.
+# GET /get_player_playcount_history: return daily playcount history for a given player.
 # GET /get_map_info: return information about a given beatmap.
 # GET /get_map_scores: return the best scores for a given beatmap & mode.
 # GET /get_score_info: return information about a given score.
@@ -553,6 +554,63 @@ async def api_get_player_most_played(
             "status": "success",
             "maps": [dict(row) for row in rows],
         },
+    )
+
+
+@router.get("/get_player_playcount_history")
+async def api_get_player_playcount_history(
+    user_id: int = Query(..., alias="id", ge=3, le=2_147_483_647),
+    mode_arg: int = Query(0, alias="mode", ge=0, le=11),
+    days: int = Query(30, ge=1, le=365),
+) -> Response:
+    """Return daily playcount history for the last X days for a given player."""
+    import datetime
+    
+    # Map extended modes to base modes for history tracking
+    # 0-3: vanilla modes, 4-7: relax modes, 8-11: autopilot modes
+    base_mode = mode_arg % 4
+    
+    # Calculate date range
+    end_date = datetime.date.today()
+    start_date = end_date - datetime.timedelta(days=days-1)
+    
+    # Query database for playcount history
+    query = """
+        SELECT date, playcount 
+        FROM user_playcount_history 
+        WHERE user_id = :user_id AND mode = :mode AND date BETWEEN :start_date AND :end_date
+        ORDER BY date ASC
+    """
+    
+    rows = await app.state.services.database.fetch_all(
+        query, 
+        {"user_id": user_id, "mode": base_mode, "start_date": start_date, "end_date": end_date}
+    )
+    
+    # Convert rows to dict for easy lookup
+    playcount_data = {}
+    for row in rows:
+        playcount_data[str(row["date"])] = row["playcount"]
+    
+    # Generate complete date range (fill missing dates with 0)
+    result = []
+    current_date = start_date
+    while current_date <= end_date:
+        date_str = str(current_date)
+        result.append({
+            "date": date_str,
+            "playcount": playcount_data.get(date_str, 0)
+        })
+        current_date += datetime.timedelta(days=1)
+    
+    return ORJSONResponse(
+        {
+            "status": "success",
+            "player_id": user_id,
+            "mode": mode_arg,
+            "days": days,
+            "data": result
+        }
     )
 
 

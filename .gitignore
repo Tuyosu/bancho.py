@@ -19,3 +19,4 @@ poetry.toml
 .coverage
 logging.yaml
 logs.log
+daily_playcount_tracker.py

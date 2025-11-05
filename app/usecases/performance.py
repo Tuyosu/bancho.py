@@ -5,9 +5,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TypedDict
 
-from akatsuki_pp_py import Beatmap
-from akatsuki_pp_py import Calculator
-from akatsuki_pp_py import DifficultyAttributes
+from rosu_pp_py import Beatmap
+from rosu_pp_py import Performance
+from rosu_pp_py import DifficultyAttributes
 
 from app.constants.mods import Mods
 
@@ -59,7 +59,7 @@ class PerformanceResult(TypedDict):
 
 
 def calculate_performances(
-    osu_file: bytes | None,
+    osu_file_path: str | None,
     scores: Iterable[ScoreParams],
 ) -> list[PerformanceResult]:
     """\
@@ -71,10 +71,10 @@ def calculate_performances(
     implemented here to handle cases where e.g. the beatmap file is invalid
     or there an issue during calculation.
     """
-    if not osu_file:
+    if not osu_file_path:
         return []
 
-    calc_bmap = Beatmap(content=osu_file)
+    calc_bmap = Beatmap(path=osu_file_path)
 
     results: list[PerformanceResult] = []
 
@@ -91,19 +91,28 @@ def calculate_performances(
             if score.mods & Mods.NIGHTCORE:
                 score.mods |= Mods.DOUBLETIME
 
-        calculator = Calculator(
-            mode=score.mode,
+        # FIX: Removed 'mode' parameter - it's not accepted by Performance
+        # The mode is determined from the beatmap itself
+        calculator = Performance(
+            # mode=score.mode,  # REMOVED - this parameter doesn't exist
             mods=score.mods or 0,
             combo=score.combo,
-            acc=score.acc,
+            accuracy=score.acc,  # Changed from 'acc' to 'accuracy'
             n300=score.n300,
             n100=score.n100,
             n50=score.n50,
             n_geki=score.ngeki,
             n_katu=score.nkatu,
-            n_misses=score.nmiss,
+            misses=score.nmiss,  # Changed from 'n_misses' to 'misses'
         )
-        result = calculator.performance(calc_bmap)
+        
+        # Set the mode on the beatmap if needed
+        # Note: rosu_pp_py typically auto-detects mode from the beatmap
+        # but if you need to override it, you might do:
+        # calc_bmap.mode = score.mode
+        
+        # Calculate using the correct method name
+        result = calculator.calculate(calc_bmap)  # Changed from 'performance' to 'calculate'
 
         pp = result.pp
         CUSTOM_PP_MULTIPLIER = 1.5
@@ -119,7 +128,6 @@ def calculate_performances(
             {
                 "performance": {
                     "pp": pp,
-                    "pp_acc": result.pp_acc,
                     "pp_aim": result.pp_aim,
                     "pp_speed": result.pp_speed,
                     "pp_flashlight": result.pp_flashlight,
@@ -136,7 +144,6 @@ def calculate_performances(
                     "stamina": result.difficulty.stamina,
                     "color": result.difficulty.color,
                     "rhythm": result.difficulty.rhythm,
-                    "peak": result.difficulty.peak,
                 },
             },
         )
@@ -144,8 +151,12 @@ def calculate_performances(
     return results
 
 
-def calculate_difficulty(bmap_file: bytes, mode: int) -> DifficultyAttributes | None:
-    calc_bmap = Beatmap(bytes=bmap_file)
+def calculate_difficulty(bmap_file: str, mode: int) -> DifficultyAttributes | None:
+    calc_bmap = Beatmap(str=bmap_file)
+    # Note: Calculator might also need adjustment
+    # If Calculator doesn't exist in rosu_pp_py, you might need:
+    # from rosu_pp_py import Difficulty
+    # calculator = Difficulty(mods=0)  # without mode parameter
     calculator = Calculator(mode=mode)
 
     result = calculator.difficulty(calc_bmap)

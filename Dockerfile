@@ -11,7 +11,7 @@ RUN apt update && apt install --no-install-recommends -y \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-COPY pyproject.toml poetry.lock ./
+COPY pyproject.toml ./
 RUN pip install -U pip poetry==2.2.1
 RUN poetry config virtualenvs.create false
 RUN poetry install --no-root
