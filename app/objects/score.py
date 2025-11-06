@@ -313,8 +313,16 @@ class Score:
         assert num_better_scores is not None
         return num_better_scores + 1
 
-    def calculate_performance(self, beatmap_id: int) -> tuple[float, float]:
+    def calculate_performance(self, osu_file_path: str) -> tuple[float, float]:
         """Calculate PP and star rating for our score."""
+        from pathlib import Path
+        
+        if not osu_file_path or not Path(osu_file_path).exists():
+            return 0.0, 0.0
+        
+        with open(osu_file_path, 'rb') as f:
+            osu_file_bytes = f.read()
+        
         mode_vn = self.mode.as_vanilla
 
         score_args = ScoreParams(
@@ -330,9 +338,12 @@ class Score:
         )
 
         result = app.usecases.performance.calculate_performances(
-            osu_file=app.state.services.storage.get_beatmap_file(beatmap_id),
+            osu_file_path=osu_file_path,
             scores=[score_args],
         )
+        
+        if not result:
+            return 0.0, 0.0
 
         return result[0]["performance"]["pp"], result[0]["difficulty"]["stars"]
 

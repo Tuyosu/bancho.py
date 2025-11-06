@@ -640,7 +640,8 @@ async def osuSubmitModularSelector(
             expected_md5=bmap.md5,
         )
         if osu_file_available:
-            score.pp, score.sr = score.calculate_performance(bmap.id)
+            osu_file_path = str(BEATMAPS_PATH / f"{bmap.id}.osu")
+            score.pp, score.sr = score.calculate_performance(osu_file_path)
 
             if score.passed:
                 await score.calculate_status()
@@ -1073,7 +1074,8 @@ async def osuSubmitModular(
         expected_md5=bmap.md5,
     )
     if osu_file_available:
-        score.pp, score.sr = score.calculate_performance(bmap.id)
+        osu_file_path = str(BEATMAPS_PATH / f"{bmap.id}.osu")
+        score.pp, score.sr = score.calculate_performance(osu_file_path)
 
         if score.passed:
             await score.calculate_status()
