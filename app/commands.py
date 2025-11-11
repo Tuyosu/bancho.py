@@ -363,22 +363,6 @@ async def bancho(ctx: Context) -> str | None:
 
     return None
 
-@command(Privileges.UNRESTRICTED, aliases=["lb"])
-async def leaderboard(ctx: Context) -> str | None:
-    if len(ctx.args) < 1 or ctx.args[0] not in ("pp", "score"):
-        return "Invalid syntax: !leaderboard <pp/score>"
-
-    await users_repo.partial_update(
-        id=ctx.player.id,
-        lb_preference=users_repo.LeaderboardPreference(ctx.args[0]),
-    )
-    ctx.player.enqueue(
-        app.packets.notification(f"Leaderboard display mode set to {ctx.args[0]}!")
-    )
-    ctx.player.logout()
-
-    return None
-
 @command(Privileges.UNRESTRICTED, aliases=["bloodcat", "beatconnect", "chimu", "q"])
 async def maplink(ctx: Context) -> str | None:
     """Return a download link to the user's current map (situation dependant)."""

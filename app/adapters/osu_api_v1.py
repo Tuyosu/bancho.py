@@ -39,7 +39,7 @@ async def api_get_beatmaps(**params: Any) -> BeatmapApiResponse:
 
     if app.settings.OSU_API_KEY:
         # https://github.com/ppy/osu-api/wiki#apiget_beatmaps
-        url = "https://old.ppy.sh/api/get_beatmaps"
+        url = "https://osu.ppy.sh/api/get_beatmaps"
         params["k"] = str(app.settings.OSU_API_KEY)
     else:
         # https://osu.direct/doc
@@ -61,7 +61,7 @@ async def api_get_scores(
     if app.settings.DEBUG:
         log(f"Doing api (getscores) request {params}", Ansi.LMAGENTA)
 
-    url = "https://old.ppy.sh/api/get_scores"
+    url = "https://osu.ppy.sh/api/get_scores"
     params["k"] = str(app.settings.OSU_API_KEY)
 
     response = await app.state.services.http_client.get(url, params=params)
@@ -77,7 +77,7 @@ async def api_get_scores(
                     "_score": (
                         int(row["score"])
                         if scoring_metric == "score"
-                        else float(row["pp"])
+                        else float(row["pp"] or 0)
                     ),
                     "max_combo": row["maxcombo"],
                     "n50": row["count50"],
@@ -100,7 +100,7 @@ async def api_get_scores(
 
 @retry(reraise=True, stop=stop_after_attempt(3))
 async def api_get_osu_file(beatmap_id: int) -> bytes:
-    url = f"https://old.ppy.sh/osu/{beatmap_id}"
+    url = f"https://osu.ppy.sh/osu/{beatmap_id}"
     response = await app.state.services.http_client.get(url)
     response.raise_for_status()
     return response.read()
@@ -108,7 +108,7 @@ async def api_get_osu_file(beatmap_id: int) -> bytes:
 
 @retry(reraise=True, stop=stop_after_attempt(3))
 async def api_get_replay(score_id: int, mode: int) -> ReplayApiResponse:
-    url = f"https://old.ppy.sh/api/get_replay?k={app.settings.OSU_API_KEY}&s={score_id}&m={mode}"
+    url = f"https://osu.ppy.sh/api/get_replay?k={app.settings.OSU_API_KEY}&s={score_id}&m={mode}"
     response = await app.state.services.http_client.get(url)
     response_data = response.json()
 
