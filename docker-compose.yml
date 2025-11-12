@@ -53,7 +53,7 @@ services:
 
   bancho:
     # we also have a public image: osuakatsuki/bancho.py:latest
-    image: bancho:latest
+    build: .
     ports:
       - ${APP_PORT}:${APP_PORT}
     depends_on:
