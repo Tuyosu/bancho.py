@@ -1097,13 +1097,7 @@ async def osuSubmitModular(
         }
     
         if score.mode in caps and score.pp >= caps[score.mode]:
-            await score.player.restrict(
-                admin=app.state.sessions.bot,
-                reason=f"achieved pp cap of {caps[score.mode]}pp in mode {score.mode}",
-            )
-
-            if score.player.is_online:
-                score.player.logout()
+            score.status = SubmissionStatus.FAILED
 
     """ Score submission checks completed; submit the score. """
 
