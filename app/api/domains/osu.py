@@ -1079,8 +1079,6 @@ async def osuSubmitModular(
 
         if score.passed:
             await score.calculate_status()
-            if score.pp > 40000.0:
-                score.player.enqueue(app.packets.notification(f"That's a lot of pp there. Report to Noemi or Kyae with the map or stop submitting aspire maps xd\nYou would have gotten a {score.pp}pp play."))
 
             if score.bmap.status != RankedStatus.Pending:
                 score.rank = await score.calculate_placement()
@@ -1088,6 +1086,24 @@ async def osuSubmitModular(
             score.status = SubmissionStatus.FAILED
 
     score.time_elapsed = score_time if score.passed else fail_time
+
+    score_eligible = score.bmap.awards_ranked_pp and score.passed
+    player_eligible = not score.player.priv & Privileges.WHITELISTED and not score.player.restricted
+    if score_eligible and player_eligible:
+        caps = {
+            0: 40000,
+            4: 40000,
+            8: 20000
+        }
+    
+        if score.mode in caps and score.pp >= caps[score.mode]:
+            await score.player.restrict(
+                admin=app.state.sessions.bot,
+                reason=f"achieved pp cap of {caps[score.mode]}pp in mode {score.mode}",
+            )
+
+            if score.player.is_online:
+                score.player.logout()
 
     """ Score submission checks completed; submit the score. """
 

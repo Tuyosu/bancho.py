@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
+from pathlib import Path as SystemPath
 from typing import Literal
 
 from fastapi import APIRouter
@@ -31,6 +32,8 @@ from app.repositories import tourney_pool_maps as tourney_pool_maps_repo
 from app.repositories import tourney_pools as tourney_pools_repo
 from app.repositories import users as users_repo
 from app.usecases.performance import ScoreParams
+
+REPLAYS_PATH = SystemPath.cwd() / ".data/osr"
 
 router = APIRouter()
 http_bearer_scheme = HTTPBearer(auto_error=False)
@@ -775,15 +778,17 @@ async def api_get_replay(
     the player's total replay views.
     """
     # fetch replay file & make sure it exists
-    replay_file = app.state.services.storage.get_replay_file(score_id)
-    if not replay_file:
+    replay_file = REPLAYS_PATH / f"{score_id}.osr"
+    if not replay_file.exists():
         return ORJSONResponse(
             {"status": "Replay not found."},
             status_code=status.HTTP_404_NOT_FOUND,
         )
+    # read replay frames from file
+    raw_replay_data = replay_file.read_bytes()
     if not include_headers:
         return Response(
-            replay_file,
+            bytes(raw_replay_data),
             media_type="application/octet-stream",
             headers={
                 "Content-Description": "File Transfer",
@@ -793,7 +798,7 @@ async def api_get_replay(
     # add replay headers from sql
     # TODO: osu_version & life graph in scores tables?
     row = await app.state.services.database.fetch_one(
-        "SELECT u.name username, m.id, m.md5 map_md5, "
+        "SELECT u.name username, m.md5 map_md5, "
         "m.artist, m.title, m.version, "
         "s.mode, s.n300, s.n100, s.n50, s.ngeki, "
         "s.nkatu, s.nmiss, s.score, s.max_combo, "
@@ -856,23 +861,23 @@ async def api_get_replay(
     timestamp = int(row["play_time"].timestamp() * 1e7)
     replay_data += struct.pack("<q", timestamp + DATETIME_OFFSET)
     # pack the raw replay data into the buffer
-    replay_data += struct.pack("<i", len(replay_file))
-    replay_data += replay_file
+    replay_data += struct.pack("<i", len(raw_replay_data))
+    replay_data += raw_replay_data
     # pack additional info buffer.
     replay_data += struct.pack("<q", score_id)
     # NOTE: target practice sends extra mods, but
     # can't submit scores so should not be a problem.
     # stream data back to the client
-
-    game_mode_str = utils.get_replay_mode_name(GameMode(row["mode"]).as_vanilla)
-    filename = f"replay-{game_mode_str}_{row['id']}_{score_id}.osr"
-
     return Response(
         bytes(replay_data),
         media_type="application/octet-stream",
         headers={
             "Content-Description": "File Transfer",
-            "Content-Disposition": (f"attachment; filename={filename}").format(**row),
+            "Content-Disposition": (
+                'attachment; filename="{username} - '
+                "{artist} - {title} [{version}] "
+                '({play_time:%Y-%m-%d}).osr"'
+            ).format(**row),
         },
     )
 
