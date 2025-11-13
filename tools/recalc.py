@@ -77,7 +77,7 @@ async def recalculate_score(
         )
         attrs = calculator.calculate(beatmap)
 
-        new_pp: float = attrs.pp
+        new_pp: float = attrs.pp * 1.5
         if math.isnan(new_pp) or math.isinf(new_pp):
             new_pp = 0.0
 
