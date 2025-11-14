@@ -1091,8 +1091,8 @@ async def osuSubmitModular(
     player_eligible = not score.player.priv & Privileges.WHITELISTED and not score.player.restricted
     if score_eligible and player_eligible:
         caps = {
-            0: 40000,
-            4: 40000,
+            0: 47500,
+            4: 47500,
             8: 20000
         }
     
