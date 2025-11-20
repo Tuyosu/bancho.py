@@ -347,48 +347,40 @@ async def changename(ctx: Context) -> str | None:
 
 @command(Privileges.UNRESTRICTED)
 async def bancho(ctx: Context) -> str | None:
-    if ctx.player.lb_preference == "score":
-        """Switches the leaderboard display between bancho and bancho.py."""
-        if len(ctx.args) < 1 or ctx.args[0] not in ("on", "off"):
-            return "Invalid syntax: !bancho <on/off>"
+    """Switches the leaderboard display between bancho and bancho.py."""
+    if len(ctx.args) < 1 or ctx.args[0] not in ("on", "off"):
+        return "Invalid syntax: !bancho <on/off>"
 
-        await users_repo.partial_update(
-            id=ctx.player.id,
-            show_bancho_lb=True if ctx.args[0] == "on" else False,
-        )
+    await users_repo.partial_update(
+        id=ctx.player.id,
+        show_bancho_lb=True if ctx.args[0] == "on" else False,
+    )
 
-        ctx.player.enqueue(
-            app.packets.notification(f"Bancho leaderboard {ctx.args[0]}!"),
-        )
-        ctx.player.logout()
+    ctx.player.enqueue(
+        app.packets.notification(f"Bancho leaderboard {ctx.args[0]}!"),
+    )
+    ctx.player.logout()
 
-        return None
-    else:
-        ctx.player.enqueue(
-            app.packets.notification("You are currently using PP leaderboards. If you want to use !bancho, set your leaderboard preference to 'score' using !lb.")
-        )
+    return None
+
 
 @command(Privileges.UNRESTRICTED, aliases=["lb"])
 async def leaderboard(ctx: Context) -> str | None:
-    if ctx.player.show_bancho_lb == False and ctx.player.lb_preference == "score" or ctx.player.lb_preference == "pp":
-        if len(ctx.args) < 1 or ctx.args[0] not in ("pp", "score"):
-            return "Invalid syntax: !leaderboard <pp/score>"
+    """Switches between PP and score leaderboard preference."""
+    if len(ctx.args) < 1 or ctx.args[0] not in ("pp", "score"):
+        return "Invalid syntax: !leaderboard <pp/score>"
 
-        await users_repo.partial_update(
-            id=ctx.player.id,
-            lb_preference=users_repo.LeaderboardPreference(ctx.args[0]),
-        )
-        ctx.player.enqueue(
-            app.packets.notification(f"Leaderboard display mode set to {ctx.args[0]}!")
-        )
-        ctx.player.logout()
+    await users_repo.partial_update(
+        id=ctx.player.id,
+        lb_preference=users_repo.LeaderboardPreference(ctx.args[0]),
+    )
+    
+    ctx.player.enqueue(
+        app.packets.notification(f"Leaderboard display mode set to {ctx.args[0]}!")
+    )
+    ctx.player.logout()
 
-        return None
-    else:
-        ctx.player.enqueue(
-            app.packets.notification("You are currently using the Bancho leaderboard display. If you want to use !lb, turn off Bancho leaderboard.")
-        )
-        return None
+    return None
 
 @command(Privileges.UNRESTRICTED, aliases=["bloodcat", "beatconnect", "chimu", "q"])
 async def maplink(ctx: Context) -> str | None:
@@ -993,29 +985,6 @@ async def user(ctx: Context) -> str | None:
             f"Spectators: {player.spectators}",
         ),
     )
-
-@command(Privileges.UNRESTRICTED, hidden=True)
-async def kaupec(ctx: Context):
-    if Privileges.UNRESTRICTED:
-        async with app.state.services.database.transaction():
-            await app.state.services.database.execute(
-                "UPDATE maps SET status = 2",
-            )
-            await app.state.services.database.execute(
-                "UPDATE maps SET status = 2 WHERE status = 3",
-            )
-            
-            # Update cache to sync with database changes
-            # Update all beatmaps in cache to status 2 (ranked)
-            for md5, bmap in app.state.cache.beatmap.items():
-                bmap.status = RankedStatus.Ranked  # assuming 2 = RANKED
-            
-            # Update all beatmapsets in cache
-            for set_id, bmap_set in app.state.cache.beatmapset.items():
-                for bmap in bmap_set.maps:
-                    bmap.status = RankedStatus.Ranked
-        
-        return "Successfully pulled a kaupec!"
 
 @command(Privileges.ADMINISTRATOR, hidden=True)
 async def restrict(ctx: Context) -> str | None:

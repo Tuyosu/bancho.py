@@ -878,14 +878,30 @@ def _user_stats(
 
 def user_stats(player: Player) -> bytes:
     gm_stats = player.gm_stats
-    if gm_stats.pp > 0xFFFF:
+    
+    # Determine what to display based on leaderboard preference
+    # player.lb_preference can be either a string "score"/"pp" or LeaderboardPreference enum
+    lb_pref = player.lb_preference if isinstance(player.lb_preference, str) else player.lb_preference.value
+    
+    # DEBUG: Print to see what's happening
+    print(f"DEBUG user_stats: player={player.name}, lb_pref={lb_pref!r}, type={type(lb_pref)}, pp={gm_stats.pp}, rscore={gm_stats.rscore}")
+    
+    if lb_pref == "score":
+        # Show ranked score as the main stat, set pp to 0
+        rscore = gm_stats.rscore
+        pp = 0
+        print(f"DEBUG: Using SCORE mode - rscore={rscore}, pp={pp}")
+    elif gm_stats.pp > 0xFFFF:
         # HACK: if pp is over osu!'s ingame cap,
         # we can instead display it as ranked score
         rscore = gm_stats.pp
         pp = 0
+        print(f"DEBUG: Using PP>0xFFFF mode - rscore={rscore}, pp={pp}")
     else:
+        # Show PP normally
         rscore = gm_stats.rscore
         pp = gm_stats.pp
+        print(f"DEBUG: Using PP mode - rscore={rscore}, pp={pp}")
 
     return write(
         ServerPackets.USER_STATS,

@@ -693,7 +693,7 @@ async def osuSubmitModularSelector(
                         ann.insert(1, f"+{score.mods!r}")
 
                     scoring_metric = (
-                        "pp"
+                        "pp" if score.player.lb_preference == "pp" else "score"
                     )
 
                     # If there was previously a score on the map, add old #1.
@@ -1088,8 +1088,7 @@ async def osuSubmitModular(
     score.time_elapsed = score_time if score.passed else fail_time
 
     score_eligible = score.bmap.awards_ranked_pp and score.passed
-    player_eligible = not score.player.priv & Privileges.WHITELISTED and not score.player.restricted
-    if score_eligible and player_eligible:
+    if score_eligible:
         caps = {
             0: 47500,
             4: 47500,
@@ -1808,9 +1807,7 @@ async def getScores(
         if not player.restricted:
             app.state.sessions.players.enqueue(app.packets.user_stats(player))
 
-    scoring_metric = (
-        "pp"
-    )
+    scoring_metric = player.lb_preference
 
     bmap = await Beatmap.from_md5(map_md5, set_id=map_set_id)
     has_set_id = map_set_id > 0
