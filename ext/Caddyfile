@@ -1,30 +1,54 @@
-# Comment this out if you need to explicitly
-# use self-signed certs.
-# NOTE: Not necessary if using a '.local' domain
-#
-# {
-# 	local_certs
-# }
-
-c.{$DOMAIN}, ce.{$DOMAIN}, c4.{$DOMAIN}, osu.{$DOMAIN}, b.{$DOMAIN}, api.{$DOMAIN} {
-	encode gzip
-	reverse_proxy * 127.0.0.1:{$APP_PORT} {
+# Bancho Backend
+c.tuyosu.de, ce.tuyosu.de, c4.tuyosu.de, osu.tuyosu.de, b.tuyosu.de, api.tuyosu.de {
+	reverse_proxy 127.0.0.1:5001 {
+		header_up X-Forwarded-For {remote_host}
 		header_up X-Real-IP {remote_host}
+		header_up Host {host}
 	}
+
+	header Access-Control-Allow-Origin *
 
 	request_body {
 		max_size 20MB
 	}
 }
 
-assets.{$DOMAIN} {
-	encode gzip
-	root * {$DATA_DIRECTORY}/assets
+# Assets domain
+assets.tuyosu.de {
+	root * /var/lib/docker/volumes/banchopy_data/_data/assets
+	file_server
+
+	header Content-Type image/png
+}
+
+# Avatars domain
+a.tuyosu.de {
+	root * /var/lib/docker/volumes/banchopy_data/_data/avatars
+	try_files {path} {path}.png {path}.jpg {path}.gif {path}.jpeg {path}.jfif /default.jpg
 	file_server
 }
 
-a.{$DOMAIN} {
+# phpMyAdmin
+pma.tuyosu.de {
+	reverse_proxy 127.0.0.1:8001 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}
+
+tuyosu.de {
+	reverse_proxy 127.0.0.1:8000 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up Host {host}
+	}
+
+	# Add CORS header (Access-Control-Allow-Origin)
+	header Access-Control-Allow-Origin *
+
+	# Optional: Enable compression
 	encode gzip
-	root * {$DATA_DIRECTORY}/avatars
-	try_files {path} {file.base}.png {file.base}.jpg {file.base}.gif {file.base}.jpeg {file.base}.jfif default.jpg =404
 }
