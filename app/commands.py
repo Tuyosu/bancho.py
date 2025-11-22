@@ -1143,6 +1143,13 @@ async def kaupec(ctx: Context) -> str | None:
             cached_map.frozen = True
 
         updated_count += 1
+        
+        # Log each map being ranked to the terminal
+        log(
+            f"[KAUPEC] Ranked map #{updated_count}: "
+            f"[{map_data['id']}] {map_data['artist']} - {map_data['title']} [{map_data['version']}]",
+            Ansi.LGREEN,
+        )
 
     return f"Successfully ranked {updated_count} maps (frozen)."
 
