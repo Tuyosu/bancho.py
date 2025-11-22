@@ -30,6 +30,11 @@ class Player(BaseModel):
     custom_badge_icon: str | None
 
     userpage_content: str | None
+    
+    # Extended fields (optional)
+    total_pp: float | None = None
+    global_rank: int | None = None
+    country_rank: int | None = None
 
 
 class PlayerStatus(BaseModel):
@@ -58,3 +63,8 @@ class PlayerStats(BaseModel):
     sh_count: int
     s_count: int
     a_count: int
+    
+    # Extended fields (optional)
+    level: int | None = None
+    global_rank: int | None = None
+    country_rank: int | None = None

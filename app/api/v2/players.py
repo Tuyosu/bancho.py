@@ -6,6 +6,7 @@ from fastapi import APIRouter
 from fastapi import status
 from fastapi.param_functions import Query
 
+import app.state
 import app.state.sessions
 from app.api.v2.common import responses
 from app.api.v2.common.responses import Failure
@@ -135,3 +136,73 @@ async def get_player_stats(
             "page_size": page_size,
         },
     )
+
+
+@router.get("/players/{player_id}/recent")
+async def get_player_recent_scores(
+    player_id: int,
+    mode: int | None = None,
+    limit: int = Query(50, ge=1, le=100),
+) -> Success[list[dict]] | Failure:
+    """Get player's recent scores (last 50 by default)."""
+    from app.api.v2.models.scores import Score
+    from app.repositories import scores as scores_repo
+    
+    # Build query
+    query_params = {"user_id": player_id, "limit": limit}
+    query = """
+        SELECT s.*, m.title as map_title, m.artist as map_artist, 
+               m.creator as map_creator, m.version as map_difficulty,
+               u.name as player_name, u.country as player_country
+        FROM scores s
+        INNER JOIN maps m ON s.map_md5 = m.md5
+        INNER JOIN users u ON s.userid = u.id
+        WHERE s.userid = :user_id
+    """
+    
+    if mode is not None:
+        query += " AND s.mode = :mode"
+        query_params["mode"] = mode
+    
+    query += " ORDER BY s.play_time DESC LIMIT :limit"
+    
+    data = await app.state.services.database.fetch_all(query, query_params)
+    
+    if not data:
+        return responses.success([])
+    
+    response = [dict(rec) for rec in data]
+    return responses.success(response)
+
+
+@router.get("/players/{player_id}/best/{mode}")
+async def get_player_best_scores(
+    player_id: int,
+    mode: int,
+    limit: int = Query(100, ge=1, le=100),
+) -> Success[list[dict]] | Failure:
+    """Get player's best scores for a specific mode (top 100 by default)."""
+    
+    # Build query for best scores
+    query = """
+        SELECT s.*, m.title as map_title, m.artist as map_artist, 
+               m.creator as map_creator, m.version as map_difficulty,
+               u.name as player_name, u.country as player_country
+        FROM scores s
+        INNER JOIN maps m ON s.map_md5 = m.md5
+        INNER JOIN users u ON s.userid = u.id
+        WHERE s.userid = :user_id AND s.mode = :mode AND s.status = 2
+        ORDER BY s.pp DESC
+        LIMIT :limit
+    """
+    
+    data = await app.state.services.database.fetch_all(
+        query,
+        {"user_id": player_id, "mode": mode, "limit": limit}
+    )
+    
+    if not data:
+        return responses.success([])
+    
+    response = [dict(rec) for rec in data]
+    return responses.success(response)
