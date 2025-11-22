@@ -1505,7 +1505,6 @@ async def getReplay(
                 return Response(b"", status_code=404)
         
         replay = base64.b64decode(api_response["content"])
-        log(f"Successfully got Bancho replay: {replay}")
         return Response(replay)
     
     if score:
