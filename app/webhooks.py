@@ -84,7 +84,7 @@ async def send_server_status_webhook() -> None:
     
     # Create embed
     embed = {
-        "title": "�️ Server Status Report",
+        "title": "🖧 Server Status Report",
         "description": "Automated status check for all server components.",
         "color": 0x00FF00,  # Green
         "fields": [
@@ -99,12 +99,12 @@ async def send_server_status_webhook() -> None:
                 "inline": True,
             },
             {
-                "name": "� API",
+                "name": "🌐 API",
                 "value": api_status,
                 "inline": True,
             },
             {
-                "name": "�👥 Online Players",
+                "name": "👥 Online Players",
                 "value": str(online_users),
                 "inline": True,
             },
