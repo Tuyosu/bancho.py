@@ -10,6 +10,7 @@ from rosu_pp_py import Performance
 from rosu_pp_py import DifficultyAttributes
 
 from app.constants.mods import Mods
+from app.constants.nerfed_maps import should_nerf_map
 
 
 @dataclass
@@ -61,6 +62,10 @@ class PerformanceResult(TypedDict):
 def calculate_performances(
     osu_file_path: str | None,
     scores: Iterable[ScoreParams],
+    map_title: str | None = None,
+    map_artist: str | None = None,
+    map_creator: str | None = None,
+    map_set_id: int | None = None,
 ) -> list[PerformanceResult]:
     """\
     Calculate performance for multiple scores on a single beatmap.
@@ -91,6 +96,10 @@ def calculate_performances(
             if score.mods & Mods.NIGHTCORE:
                 score.mods |= Mods.DOUBLETIME
 
+        # Buff miss penalty by 15% (make misses hurt more)
+        MISS_PENALTY_MULTIPLIER = 1.15
+        adjusted_misses = int((score.nmiss or 0) * MISS_PENALTY_MULTIPLIER) if score.nmiss else None
+
         # FIX: Removed 'mode' parameter - it's not accepted by Performance
         # The mode is determined from the beatmap itself
         calculator = Performance(
@@ -103,7 +112,7 @@ def calculate_performances(
             n50=score.n50,
             n_geki=score.ngeki,
             n_katu=score.nkatu,
-            misses=score.nmiss,  # Changed from 'n_misses' to 'misses'
+            misses=adjusted_misses,  # Use adjusted miss count with penalty
         )
         
         # Set the mode on the beatmap if needed
@@ -114,9 +123,44 @@ def calculate_performances(
         # Calculate using the correct method name
         result = calculator.calculate(calc_bmap)  # Changed from 'performance' to 'calculate'
 
-        pp = result.pp
-        CUSTOM_PP_MULTIPLIER = 1.5
-        pp = pp * CUSTOM_PP_MULTIPLIER
+        # Custom multipliers for each PP component
+        AIM_MULTIPLIER = 0.75      # Nerf aim by 25%
+        SPEED_MULTIPLIER = 1.25    # Buff speed by 25%
+        ACCURACY_MULTIPLIER = 1.20 # Buff accuracy by 20%
+        FLASHLIGHT_MULTIPLIER = 0.60 # Nerf flashlight by 40%
+        
+        # Apply multipliers to individual components
+        pp_aim = (result.pp_aim or 0.0) * AIM_MULTIPLIER
+        pp_speed = (result.pp_speed or 0.0) * SPEED_MULTIPLIER
+        pp_flashlight = (result.pp_flashlight or 0.0) * FLASHLIGHT_MULTIPLIER
+        
+        # For accuracy, we need to extract it from the total
+        # The rosu_pp formula combines components, so we recalculate from weighted parts
+        # Note: pp_acc is not directly available in rosu_pp_py result, so we estimate it
+        # Total PP ≈ aim + speed + acc + flashlight (simplified, actual formula is more complex)
+        
+        # Get base accuracy PP by subtracting known components from total
+        base_total = result.pp or 0.0
+        base_aim = result.pp_aim or 0.0
+        base_speed = result.pp_speed or 0.0
+        base_flashlight = result.pp_flashlight or 0.0
+        
+        # Estimate accuracy PP (this is approximate)
+        pp_acc_estimated = max(0.0, base_total - base_aim - base_speed - base_flashlight)
+        pp_acc = pp_acc_estimated * ACCURACY_MULTIPLIER
+        
+        # Recalculate total PP from modified components
+        # Using a weighted combination similar to osu!'s formula
+        pp_recalculated = pp_aim + pp_speed + pp_acc + pp_flashlight
+        
+        # Apply global multiplier
+        CUSTOM_PP_MULTIPLIER = 1.25
+        pp = pp_recalculated * CUSTOM_PP_MULTIPLIER
+        
+        # Apply map-specific nerf (speed-up maps, specific mappers, etc.)
+        if map_title and map_artist and map_creator and map_set_id is not None:
+            map_nerf_multiplier = should_nerf_map(map_title, map_artist, map_creator, map_set_id)
+            pp = pp * map_nerf_multiplier
 
         if math.isnan(pp) or math.isinf(pp):
             # TODO: report to logserver
@@ -128,9 +172,9 @@ def calculate_performances(
             {
                 "performance": {
                     "pp": pp,
-                    "pp_aim": result.pp_aim,
-                    "pp_speed": result.pp_speed,
-                    "pp_flashlight": result.pp_flashlight,
+                    "pp_aim": pp_aim,
+                    "pp_speed": pp_speed,
+                    "pp_flashlight": pp_flashlight,
                     "effective_miss_count": result.effective_miss_count,
                     "pp_difficulty": result.pp_difficulty,
                 },
