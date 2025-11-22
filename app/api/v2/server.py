@@ -4,8 +4,8 @@ from fastapi import APIRouter
 from fastapi import status
 
 import app.state
-from app.api.v2 import responses
-from app.api.v2.models import responses as model_responses
+from app.api.v2.common import responses
+from app.api.v2.common.responses import Success
 from app.api.v2.models.server import PPSystemConfig
 from app.api.v2.models.server import ServerStats
 
@@ -13,7 +13,7 @@ router = APIRouter()
 
 
 @router.get("/server/stats")
-async def get_server_stats() -> model_responses.Success[ServerStats]:
+async def get_server_stats() -> Success[ServerStats]:
     """Get server statistics and PP system configuration."""
     
     # Get total users

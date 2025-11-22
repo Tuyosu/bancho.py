@@ -11,7 +11,7 @@ from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import status
 
-from app.api.v2 import responses
+from app.api.v2.common import responses
 from app.api.v2.auth import require_api_key
 from app.api.v2.common.responses import Failure
 from app.api.v2.common.responses import Success
