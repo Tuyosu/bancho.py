@@ -26,6 +26,7 @@ async def initialize_housekeeping_tasks() -> None:
                 _remove_expired_donation_privileges(interval=30 * 60),
                 _update_bot_status(interval=5 * 60),
                 _disconnect_ghosts(interval=OSU_CLIENT_MIN_PING_INTERVAL // 3),
+                _server_status_webhook(interval=30 * 60),  # Every 30 minutes
             )
         },
     )
@@ -87,3 +88,9 @@ async def _update_bot_status(interval: int) -> None:
     while True:
         await asyncio.sleep(interval)
         app.packets.bot_stats.cache_clear()
+
+
+async def _server_status_webhook(interval: int) -> None:
+    """Send server status webhook to Discord every `interval` seconds."""
+    from app.webhooks import server_status_webhook_loop
+    await server_status_webhook_loop(interval)
