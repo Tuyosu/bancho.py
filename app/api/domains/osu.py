@@ -1097,6 +1097,14 @@ async def osuSubmitModular(
     
         if score.mode in caps and score.pp >= caps[score.mode]:
             score.status = SubmissionStatus.FAILED
+            
+            # Notify the player about the PP cap
+            score.player.enqueue(
+                app.packets.notification(
+                    f"You have submitted a play above the PP cap ({caps[score.mode]:,} PP), "
+                    f"it will not be submitted."
+                )
+            )
 
     """ Score submission checks completed; submit the score. """
 

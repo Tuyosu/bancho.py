@@ -1118,6 +1118,35 @@ async def shutdown(ctx: Context) -> str | None | NoReturn:
         return "Process killed"
 
 
+@command(Privileges.ADMINISTRATOR, hidden=True)
+async def kaupec(ctx: Context) -> str | None:
+    """Set all maps in the database to ranked status (frozen)."""
+    # Fetch all maps from database
+    all_maps = await maps_repo.fetch_many()
+
+    if not all_maps:
+        return "No maps found in database."
+
+    # Update all maps to ranked and frozen
+    updated_count = 0
+    for map_data in all_maps:
+        await maps_repo.partial_update(
+            id=map_data["id"],
+            status=RankedStatus.Ranked,
+            frozen=True,
+        )
+
+        # Update cache if map is cached
+        if map_data["md5"] in app.state.cache.beatmap:
+            cached_map = app.state.cache.beatmap[map_data["md5"]]
+            cached_map.status = RankedStatus.Ranked
+            cached_map.frozen = True
+
+        updated_count += 1
+
+    return f"Successfully ranked {updated_count} maps (frozen)."
+
+
 """ Developer commands
 # The commands below are either dangerous or
 # simply not useful for any other roles.

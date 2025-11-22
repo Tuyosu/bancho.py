@@ -118,10 +118,10 @@ async def lifespan(asgi_app: BanchoAPI) -> AsyncIterator[None]:
     await app.state.services.database.disconnect()
     await app.state.services.redis.aclose()
 
-    await app.state.services.osu_api_v1.aclose()
-    del app.state.services.osu_api_v1
-    await app.state.services.osu_api_v2.aclose()
-    del app.state.services.osu_api_v2
+    #await app.state.services.osu_api_v1.aclose()
+    #del app.state.services.osu_api_v1
+    #await app.state.services.osu_api_v2.aclose()
+    #del app.state.services.osu_api_v2
 
     if app.state.services.datadog is not None:
         app.state.services.datadog.stop()  # type: ignore[no-untyped-call]
