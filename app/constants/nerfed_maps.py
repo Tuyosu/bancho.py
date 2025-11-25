@@ -11,6 +11,8 @@ NERFED_TITLE_PATTERNS = [
     "speed-up map",
     "speed up map pack",
     "sped up pack",
+    "over Speed-up pack"
+    "over speed-up pack"
 ]
 
 # Specific beatmap set IDs to nerf (if you want to manually add specific sets)
@@ -31,6 +33,8 @@ MAPPER_NERFS = {
     "Toffery2002": 0.85,
     "helloisuck": 0.85,
     "hool": 0.85,
+    "Learner_": 0.50,
+    "tazuwik": 0.75,
 }
 
 # Default nerf multiplier for speed-up maps (15% nerf)

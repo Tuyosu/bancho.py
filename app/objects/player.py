@@ -361,6 +361,28 @@ class Player:
     @property
     def gm_stats(self) -> ModeData:
         """The player's stats in their currently selected mode."""
+        # Handle case where stats for the current mode haven't been loaded yet
+        if self.status.mode not in self.stats:
+            # Return default stats if mode doesn't exist
+            return ModeData(
+                tscore=0,
+                rscore=0,
+                pp=0,
+                acc=0.0,
+                plays=0,
+                playtime=0,
+                max_combo=0,
+                total_hits=0,
+                rank=0,
+                bancho_rank=0,
+                grades={
+                    Grade.XH: 0,
+                    Grade.X: 0,
+                    Grade.SH: 0,
+                    Grade.S: 0,
+                    Grade.A: 0,
+                },
+            )
         return self.stats[self.status.mode]
 
     @property

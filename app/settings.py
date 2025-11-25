@@ -31,6 +31,8 @@ REDIS_AUTH_STRING = f"{REDIS_USER}:{REDIS_PASS}@" if REDIS_USER and REDIS_PASS e
 REDIS_DSN = f"redis://{REDIS_AUTH_STRING}{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
 
 OSU_API_KEY = os.environ.get("OSU_API_KEY") or None
+OSU_CLIENT_ID = os.environ.get("OSU_CLIENT_ID") or None
+OSU_CLIENT_SECRET = os.environ.get("OSU_CLIENT_SECRET") or None
 OSU_DAILY_API_KEY = os.environ.get("OSU_DAILY_API_KEY") or None
 
 DOMAIN = os.environ["DOMAIN"]

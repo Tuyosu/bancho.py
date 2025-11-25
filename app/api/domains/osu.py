@@ -8,6 +8,7 @@ import hashlib
 import random
 import secrets
 import base64
+from datetime import datetime
 import app.usecases.performance
 from app.usecases.performance import ScoreParams
 from collections import defaultdict
@@ -48,7 +49,7 @@ import app.state
 import app.utils
 from app import encryption
 from app._typing import UNSET
-from app.adapters.osu_api_v1 import api_get_replay
+from app.adapters.osu_api_v1 import api_get_beatmaps
 from app.adapters.osu_api_v1 import api_get_scores
 from app.constants import regexes
 from app.constants.clientflags import LastFMFlags
@@ -1487,34 +1488,18 @@ async def getReplay(
     score_id: int = Query(..., alias="c", min=0, max=9_223_372_036_854_775_807),
 ) -> Response:
     score = await Score.from_sql(score_id)
-
-    if score and score.player is not None and score.player.id == player.id:
-        replay = app.state.services.storage.get_replay_file(score_id)
-        if replay:
-            return Response(replay)
+    if not score:
         return Response(b"", status_code=404)
-    if player.show_bancho_lb:
-        api_data = await api_get_replay(score_id, mode)
-        if api_data["data"]:
-            api_response = api_data["data"]
 
-            if (
-                "error" in api_response
-                and api_response["error"] == "Replay not available."
-            ):
-                return Response(b"", status_code=404)
-        
-        replay = base64.b64decode(api_response["content"])
-        return Response(replay)
-    
-    if score:
-        replay = app.state.services.storage.get_replay_file(score_id)
-        if replay:
-            if score.player is not None and player.id != score.player.id:
-                app.state.loop.create_task(score.increment_replay_views())
-            return Response(replay)
-    
-    return Response(b"", status_code=404)
+    file = REPLAYS_PATH / f"{score_id}.osr"
+    if not file.exists():
+        return Response(b"", status_code=404)
+
+    # increment replay views for this score
+    if score.player is not None and player.id != score.player.id:
+        app.state.loop.create_task(score.increment_replay_views())  # type: ignore[unused-awaitable]
+
+    return FileResponse(file)
 
 
 @router.get("/web/osu-rate.php")
@@ -1629,6 +1614,7 @@ async def get_leaderboard_scores(
             bancho_scores + local_scores,
             key=lambda x: (-x["_score"], x["time"]),
         )[:50]
+
 
         query = [
             f"SELECT s.id, s.{scoring_metric} AS _score, "

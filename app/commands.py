@@ -1120,38 +1120,138 @@ async def shutdown(ctx: Context) -> str | None | NoReturn:
 
 @command(Privileges.ADMINISTRATOR, hidden=True)
 async def kaupec(ctx: Context) -> str | None:
-    """Set all maps in the database to ranked status (frozen)."""
-    # Fetch all maps from database
+    """Fetch all maps from osu! API v2 and rank them progressively."""
+    from app.adapters import osu_api_v2
+    from app.objects.beatmap import BeatmapSet
+    import asyncio
+    from datetime import datetime
+    
+    # Setup log file
+    log_file = Path.cwd() / "kaupec.log"
+    
+    def log_to_file(message: str):
+        """Write to log file with timestamp."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_file, "a") as f:
+            f.write(f"[{timestamp}] {message}\n")
+    
+    log("[KAUPEC] Command started - logging to kaupec.log", Ansi.LYELLOW)
+    log_to_file("=== KAUPEC Command Started ===")
+    
+    # Step 1: Fetch all beatmaps from osu! API v2
+    log("[KAUPEC] Fetching all beatmaps from osu! API v2...", Ansi.LCYAN)
+    log_to_file("Starting API fetch for all beatmaps")
+    
+    fetched_count = 0
+    batch_count = 0
+    cursor = None
+    
+    try:
+        while True:
+            batch_count += 1
+            
+            # Fetch beatmaps from API (all statuses, not just ranked)
+            api_response = await osu_api_v2.api_get_ranked_beatmaps(
+                cursor_string=cursor,
+                limit=50  # API limit per request
+            )
+            
+            beatmapsets = api_response.get("beatmapsets", [])
+            if not beatmapsets:
+                log_to_file("No more beatmaps to fetch from API")
+                break
+            
+            # Process each beatmapset
+            batch_fetched = 0
+            skipped = 0
+            for bset_data in beatmapsets:
+                bset_id = bset_data["id"]
+                
+                # Check if beatmapset already exists in database
+                existing_maps = await maps_repo.fetch_many(set_id=bset_id)
+                if existing_maps:
+                    # Already in database, skip
+                    skipped += 1
+                    continue
+                
+                # Fetch and cache the beatmapset
+                try:
+                    beatmapset = await BeatmapSet.from_bsid(bset_id)
+                    if beatmapset:
+                        batch_fetched += len(beatmapset.maps)
+                        fetched_count += len(beatmapset.maps)
+                        log_to_file(f"Added beatmapset #{bset_id} ({len(beatmapset.maps)} maps)")
+                except Exception as e:
+                    log_to_file(f"Error fetching beatmapset #{bset_id}: {e}")
+            
+            # Log batch completion to file
+            log_to_file(f"Batch #{batch_count}: {batch_fetched} maps fetched, {skipped} sets skipped | Total: {fetched_count} maps")
+            
+            # Check for next page
+            cursor = api_response.get("cursor_string")
+            if not cursor:
+                log_to_file("Reached end of API results")
+                break
+            
+            # Wait 5 seconds every 6 batches to avoid rate limiting
+            if batch_count % 6 == 0:
+                log_to_file(f"Processed {batch_count} batches, waiting 5 seconds...")
+                await asyncio.sleep(5)
+                
+    except Exception as e:
+        log_to_file(f"Error fetching from API: {e}")
+        log(f"[KAUPEC] Error fetching from API: {e}", Ansi.LRED)
+    
+    log_to_file(f"API fetch complete: {fetched_count} new maps fetched from {batch_count} batches")
+    log(f"[KAUPEC] Fetched {fetched_count} new maps from API", Ansi.LGREEN)
+    
+    # Step 2: Rank all unranked maps in database
+    log("[KAUPEC] Ranking unranked maps in database...", Ansi.LCYAN)
+    log_to_file("Starting ranking process for unranked maps")
+    
     all_maps = await maps_repo.fetch_many()
-
-    if not all_maps:
-        return "No maps found in database."
-
-    # Update all maps to ranked and frozen
+    log_to_file(f"Found {len(all_maps)} total maps in database")
+    
+    # Filter maps that are not already ranked
+    unranked_maps = [
+        map_data for map_data in all_maps 
+        if map_data["status"] != RankedStatus.Ranked
+    ]
+    
+    log_to_file(f"Found {len(unranked_maps)} unranked maps to rank")
+    
+    if not unranked_maps:
+        log_to_file("All maps are already ranked")
+        return f"Fetched {fetched_count} new maps. All maps are already ranked."
+    
+    total_maps = len(unranked_maps)
     updated_count = 0
-    for map_data in all_maps:
+    
+    # Update all unranked maps to ranked and frozen
+    for map_data in unranked_maps:
         await maps_repo.partial_update(
             id=map_data["id"],
             status=RankedStatus.Ranked,
             frozen=True,
         )
-
+        
         # Update cache if map is cached
         if map_data["md5"] in app.state.cache.beatmap:
             cached_map = app.state.cache.beatmap[map_data["md5"]]
             cached_map.status = RankedStatus.Ranked
             cached_map.frozen = True
-
+        
         updated_count += 1
         
-        # Log each map being ranked to the terminal
-        log(
-            f"[KAUPEC] Ranked map #{updated_count}: "
-            f"[{map_data['id']}] {map_data['artist']} - {map_data['title']} [{map_data['version']}]",
-            Ansi.LGREEN,
-        )
-
-    return f"Successfully ranked {updated_count} maps (frozen)."
+        # Log every 100 maps
+        if updated_count % 100 == 0:
+            log_to_file(f"Ranked {updated_count}/{total_maps} maps")
+    
+    log_to_file(f"Ranking complete: {updated_count} maps ranked")
+    log(f"[KAUPEC] Completed! Ranked {updated_count} maps", Ansi.LGREEN)
+    log_to_file("=== KAUPEC Command Completed ===")
+    
+    return f"Fetched {fetched_count} new maps from API. Ranked {updated_count} maps (frozen). Check kaupec.log for details."
 
 
 """ Developer commands

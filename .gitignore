@@ -20,3 +20,4 @@ poetry.toml
 logging.yaml
 logs.log
 daily_playcount_tracker.py
+kaupec.log

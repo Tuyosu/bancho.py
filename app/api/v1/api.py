@@ -33,7 +33,7 @@ from app.repositories import tourney_pools as tourney_pools_repo
 from app.repositories import users as users_repo
 from app.usecases.performance import ScoreParams
 
-REPLAYS_PATH = SystemPath.cwd() / ".data/osr"
+REPLAYS_PATH = "/var/lib/docker/volumes/bancho-new_data/_data/osr"
 
 router = APIRouter()
 http_bearer_scheme = HTTPBearer(auto_error=False)
@@ -779,6 +779,7 @@ async def api_get_replay(
     """
     # fetch replay file & make sure it exists
     replay_file = REPLAYS_PATH / f"{score_id}.osr"
+    print(REPLAYS_PATH)
     if not replay_file.exists():
         return ORJSONResponse(
             {"status": "Replay not found."},
