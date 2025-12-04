@@ -1015,6 +1015,59 @@ class Player:
                 },
             )
 
+    async def recalc_stats_sql(self, mode: GameMode) -> ModeData:
+        """Recalculate `self`'s stats for a specific mode from the database."""
+        # Recalculate stats in the database using the stats repository
+        await stats_repo.sql_recalculate_mode(self.id, mode.value)
+        
+        # Fetch the updated stats from the database
+        row = await stats_repo.fetch_one(player_id=self.id, mode=mode.value)
+        
+        if row is None:
+            # If no stats exist, return default stats
+            return ModeData(
+                tscore=0,
+                rscore=0,
+                pp=0,
+                acc=0.0,
+                plays=0,
+                playtime=0,
+                max_combo=0,
+                total_hits=0,
+                rank=0,
+                bancho_rank=0,
+                grades={
+                    Grade.XH: 0,
+                    Grade.X: 0,
+                    Grade.SH: 0,
+                    Grade.S: 0,
+                    Grade.A: 0,
+                },
+            )
+        
+        # Update the in-memory stats with the recalculated values
+        self.stats[mode] = ModeData(
+            tscore=row["tscore"],
+            rscore=row["rscore"],
+            pp=row["pp"],
+            acc=row["acc"],
+            plays=row["plays"],
+            playtime=row["playtime"],
+            max_combo=row["max_combo"],
+            total_hits=row["total_hits"],
+            rank=await self.get_global_rank(mode),
+            bancho_rank=0,  # will be updated separately if needed
+            grades={
+                Grade.XH: row["xh_count"],
+                Grade.X: row["x_count"],
+                Grade.SH: row["sh_count"],
+                Grade.S: row["s_count"],
+                Grade.A: row["a_count"],
+            },
+        )
+        
+        return self.stats[mode]
+
     async def update_bancho_rank(self) -> None:
         for mode in (
             GameMode.VANILLA_OSU,

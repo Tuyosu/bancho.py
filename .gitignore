@@ -21,3 +21,9 @@ logging.yaml
 logs.log
 daily_playcount_tracker.py
 kaupec.log
+logs/recalc/recalc_*
+*.md
+pp-ffi/
+recalc_all_users.sh
+recalc_all_stats.sql
+recalc_stats.sql

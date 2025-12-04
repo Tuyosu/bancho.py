@@ -253,6 +253,7 @@ async def sql_recalculate_mode(player_id: int, mode: int) -> None:
             s1.status = 2
             AND m.status IN (2, 3)
             AND s1.pp > 0
+            AND s1.acc >= 90.0
             AND s1.mode = :mode
             AND s1.userid = :user_id
         ORDER BY
@@ -276,7 +277,7 @@ async def sql_recalculate_mode(player_id: int, mode: int) -> None:
         SELECT
             SUM(POW (0.95, global_rank - 1) * pp) AS weightedPP,
             (1 - POW (0.9994, COUNT(*))) * 416.6667 AS bnsPP,
-            SUM(POW (0.95, global_rank - 1) * acc) / SUM(POW (0.95, global_rank - 1)) AS acc
+            AVG(CASE WHEN global_rank <= 100 THEN acc ELSE NULL END) AS acc
         FROM
             bests
     ),

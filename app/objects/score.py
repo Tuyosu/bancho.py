@@ -337,9 +337,15 @@ class Score:
             nmiss=self.nmiss,
         )
 
+        # Pass beatmap metadata to enable map-specific nerfs
         result = app.usecases.performance.calculate_performances(
             osu_file_path=osu_file_path,
             scores=[score_args],
+            map_title=self.bmap.title if self.bmap else None,
+            map_artist=self.bmap.artist if self.bmap else None,
+            map_creator=self.bmap.creator if self.bmap else None,
+            map_set_id=self.bmap.set_id if self.bmap else None,
+            player_id=self.player.id if self.player else None,  # Pass player ID for buffs
         )
         
         if not result:

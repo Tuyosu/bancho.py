@@ -57,8 +57,8 @@ async def get_server_stats() -> Success[ServerStats]:
         flashlight_multiplier=0.60,
         miss_penalty_multiplier=1.15,
         global_multiplier=1.25,
-        standard_pp_cap=47500,
-        relax_pp_cap=47500,
+        standard_pp_cap=55000,
+        relax_pp_cap=55000,
         autopilot_pp_cap=20000,
     )
     

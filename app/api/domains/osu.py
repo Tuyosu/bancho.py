@@ -1091,12 +1091,12 @@ async def osuSubmitModular(
     score_eligible = score.bmap.awards_ranked_pp and score.passed
     if score_eligible:
         caps = {
-            0: 47500,
-            4: 47500,
+            0: 55000,
+            4: 55000,
             8: 20000
         }
     
-        if score.mode in caps and score.pp >= caps[score.mode]:
+        if score.mode in caps and score.pp > caps[score.mode]:
             score.status = SubmissionStatus.FAILED
             
             # Notify the player about the PP cap

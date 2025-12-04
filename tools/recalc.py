@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import TypeVar
@@ -48,6 +49,10 @@ class Context:
     database: databases.Database
     redis: aioredis.Redis
     beatmaps: dict[int, Beatmap] = field(default_factory=dict)
+    log_file: Any = None  # File handle for logging
+    score_changes: list[dict] = field(default_factory=list)
+    user_changes: list[dict] = field(default_factory=list)
+    start_time: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
 def divide_chunks(values: list[T], n: int) -> Iterator[list[T]]:
@@ -65,8 +70,15 @@ async def recalculate_score(
             beatmap = Beatmap(path=str(beatmap_path))
             ctx.beatmaps[score["map_id"]] = beatmap
 
-        # Buff miss penalty by 15% (make misses hurt more)
-        MISS_PENALTY_MULTIPLIER = 1.15
+        # Check if Relax mod is active (Relax = 128)
+        is_relax = bool(score["mods"] & 128)
+        
+        # Adjust miss penalty based on mod
+        if is_relax:
+            MISS_PENALTY_MULTIPLIER = 1.20  # Relax: 20% more hurting
+        else:
+            MISS_PENALTY_MULTIPLIER = 1.15  # Normal: 15% more hurting
+        
         adjusted_misses = int(score["nmiss"] * MISS_PENALTY_MULTIPLIER) if score["nmiss"] else 0
 
         calculator = Performance(
@@ -82,10 +94,17 @@ async def recalculate_score(
         attrs = calculator.calculate(beatmap)
 
         # Custom multipliers matching performance.py
-        AIM_MULTIPLIER = 0.75      # Nerf aim by 25%
-        SPEED_MULTIPLIER = 1.25    # Buff speed by 25%
-        ACCURACY_MULTIPLIER = 1.20 # Buff accuracy by 20%
-        FLASHLIGHT_MULTIPLIER = 0.60 # Nerf flashlight by 40%
+        # Different values for Relax mod
+        if is_relax:
+            AIM_MULTIPLIER = 1.35      # Relax: Buff aim by 35%
+            SPEED_MULTIPLIER = 0.85    # Relax: Nerf speed by 15%
+            ACCURACY_MULTIPLIER = 1.20 # Same: Buff accuracy by 20%
+            FLASHLIGHT_MULTIPLIER = 0.60 # Same: Nerf flashlight by 40%
+        else:
+            AIM_MULTIPLIER = 1.10      # Normal: Buff aim by 10%
+            SPEED_MULTIPLIER = 1.20    # Normal: Buff speed by 20%
+            ACCURACY_MULTIPLIER = 1.35 # Normal: Buff accuracy by 35%
+            FLASHLIGHT_MULTIPLIER = 0.70 # Normal: Nerf flashlight by 30%
         
         # Apply multipliers to individual components
         pp_aim = (attrs.pp_aim or 0.0) * AIM_MULTIPLIER
@@ -115,9 +134,30 @@ async def recalculate_score(
                 score["title"], 
                 score["artist"], 
                 score["creator"], 
-                score["set_id"]
+                score["set_id"],
+                mods=score["mods"]  # Pass mods to enable Relax-specific nerfs
             )
             new_pp = new_pp * map_nerf_multiplier
+        
+        # Apply PP caps
+        PP_CAPS = {
+            0: 55000,  # Standard
+            4: 55000,  # Relax
+            8: 20000,  # Autopilot
+        }
+        if score["mode"] in PP_CAPS and new_pp > PP_CAPS[score["mode"]]:
+            new_pp = float(PP_CAPS[score["mode"]])
+        
+        # Apply player-specific buffs
+        # Configure player buffs here: {player_id: multiplier}
+        PLAYER_BUFFS = {
+            4: 1.10,  # User ID 4 gets 1.10x PP buff (10% increase)
+            # Add more players as needed
+        }
+        
+        if "userid" in score and score["userid"] in PLAYER_BUFFS:
+            new_pp = new_pp * PLAYER_BUFFS[score["userid"]]
+
         
         if math.isnan(new_pp) or math.isinf(new_pp):
             new_pp = 0.0
@@ -127,6 +167,21 @@ async def recalculate_score(
             {"new_pp": new_pp, "id": score["id"]},
         )
 
+        # Log the change
+        if ctx.log_file:
+            is_relax = bool(score["mods"] & 128)
+            change_record = {
+                "score_id": score["id"],
+                "old_pp": round(score["pp"], 3),
+                "new_pp": round(new_pp, 3),
+                "change": round(new_pp - score["pp"], 3),
+                "map": f"{score.get('artist', 'Unknown')} - {score.get('title', 'Unknown')} [{score.get('creator', 'Unknown')}]",
+                "mods": score["mods"],
+                "is_relax": is_relax,
+                "mode": score["mode"]
+            }
+            ctx.score_changes.append(change_record)
+        
         if debug_mode_enabled:
             print(
                 f"Recalculated score ID {score['id']} ({score['pp']:.3f}pp -> {new_pp:.3f}pp)",
@@ -187,9 +242,14 @@ async def recalculate_user(
     bonus_pp = 416.6667 * (1 - 0.9994**total_scores)
     pp = round(weighted_pp + bonus_pp)
 
+    # Use INSERT...ON DUPLICATE KEY UPDATE to handle missing stats records
     await ctx.database.execute(
-        "UPDATE stats SET pp = :pp, acc = :acc WHERE id = :id AND mode = :mode",
-        {"pp": pp, "acc": acc, "id": id, "mode": game_mode},
+        """
+        INSERT INTO stats (id, mode, pp, acc, plays, tscore, rscore, playtime, max_combo, total_hits, xh_count, x_count, sh_count, s_count, a_count)
+        VALUES (:id, :mode, :pp, :acc, :plays, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        ON DUPLICATE KEY UPDATE pp = :pp, acc = :acc, plays = :plays
+        """,
+        {"pp": pp, "acc": acc, "id": id, "mode": game_mode, "plays": total_scores},
     )
 
     user_info = await ctx.database.fetch_one(
@@ -210,6 +270,17 @@ async def recalculate_user(
             {str(id): pp},
         )
         
+    # Log user stat change
+    if ctx.log_file:
+        user_record = {
+            "user_id": id,
+            "pp": round(pp, 3),
+            "acc": round(acc, 3),
+            "mode": game_mode.value,
+            "total_scores": total_scores
+        }
+        ctx.user_changes.append(user_record)
+    
     if debug_mode_enabled:
         print(f"Recalculated user ID {id} ({pp:.3f}pp, {acc:.3f}%)")
 
@@ -239,7 +310,7 @@ async def recalculate_mode_scores(mode: GameMode, ctx: Context) -> None:
         dict(row)
         for row in await ctx.database.fetch_all(
             """\
-            SELECT scores.id, scores.mode, scores.mods, scores.map_md5,
+            SELECT scores.id, scores.userid, scores.mode, scores.mods, scores.map_md5,
               scores.pp, scores.acc, scores.max_combo,
               scores.ngeki, scores.n300, scores.nkatu, scores.n100, scores.n50, scores.nmiss,
               maps.id as `map_id`, maps.title, maps.artist, maps.creator, maps.set_id
@@ -255,6 +326,72 @@ async def recalculate_mode_scores(mode: GameMode, ctx: Context) -> None:
 
     for score_chunk in divide_chunks(scores, 100):
         await process_score_chunk(score_chunk, ctx)
+
+
+def write_log_file(ctx: Context, modes: list[str], no_scores: bool, no_stats: bool) -> None:
+    """Write detailed log file with all recalculation changes."""
+    if not ctx.log_file:
+        return
+    
+    end_time = datetime.now().isoformat()
+    
+    # Write header
+    ctx.log_file.write("=" * 80 + "\n")
+    ctx.log_file.write("PP RECALCULATION LOG\n")
+    ctx.log_file.write("=" * 80 + "\n\n")
+    
+    # Write metadata
+    ctx.log_file.write(f"Start Time: {ctx.start_time}\n")
+    ctx.log_file.write(f"End Time: {end_time}\n")
+    ctx.log_file.write(f"Modes: {', '.join(modes)}\n")
+    ctx.log_file.write(f"Recalculate Scores: {not no_scores}\n")
+    ctx.log_file.write(f"Recalculate Stats: {not no_stats}\n")
+    ctx.log_file.write("\n")
+    
+    # Write score changes
+    if ctx.score_changes:
+        ctx.log_file.write("=" * 80 + "\n")
+        ctx.log_file.write(f"SCORE CHANGES ({len(ctx.score_changes)} total)\n")
+        ctx.log_file.write("=" * 80 + "\n\n")
+        
+        for change in ctx.score_changes:
+            ctx.log_file.write(f"Score ID: {change['score_id']}\n")
+            ctx.log_file.write(f"  Map: {change['map']}\n")
+            ctx.log_file.write(f"  Mode: {change['mode']} | Mods: {change['mods']} | Relax: {change['is_relax']}\n")
+            ctx.log_file.write(f"  PP Change: {change['old_pp']:.3f}pp -> {change['new_pp']:.3f}pp ")
+            ctx.log_file.write(f"({'+' if change['change'] >= 0 else ''}{change['change']:.3f}pp)\n")
+            ctx.log_file.write("\n")
+    
+    # Write user stat changes
+    if ctx.user_changes:
+        ctx.log_file.write("=" * 80 + "\n")
+        ctx.log_file.write(f"USER STAT UPDATES ({len(ctx.user_changes)} total)\n")
+        ctx.log_file.write("=" * 80 + "\n\n")
+        
+        for user in ctx.user_changes:
+            ctx.log_file.write(f"User ID: {user['user_id']}\n")
+            ctx.log_file.write(f"  Mode: {user['mode']}\n")
+            ctx.log_file.write(f"  PP: {user['pp']:.3f}pp\n")
+            ctx.log_file.write(f"  Accuracy: {user['acc']:.3f}%\n")
+            ctx.log_file.write(f"  Total Scores: {user['total_scores']}\n")
+            ctx.log_file.write("\n")
+    
+    # Write summary
+    ctx.log_file.write("=" * 80 + "\n")
+    ctx.log_file.write("SUMMARY\n")
+    ctx.log_file.write("=" * 80 + "\n\n")
+    ctx.log_file.write(f"Total Scores Recalculated: {len(ctx.score_changes)}\n")
+    ctx.log_file.write(f"Total Users Updated: {len(ctx.user_changes)}\n")
+    
+    if ctx.score_changes:
+        total_pp_change = sum(c['change'] for c in ctx.score_changes)
+        avg_pp_change = total_pp_change / len(ctx.score_changes)
+        ctx.log_file.write(f"Total PP Change: {'+' if total_pp_change >= 0 else ''}{total_pp_change:.3f}pp\n")
+        ctx.log_file.write(f"Average PP Change: {'+' if avg_pp_change >= 0 else ''}{avg_pp_change:.3f}pp\n")
+    
+    ctx.log_file.write("\n" + "=" * 80 + "\n")
+    ctx.log_file.write("END OF LOG\n")
+    ctx.log_file.write("=" * 80 + "\n")
 
 
 async def main(argv: Sequence[str] | None = None) -> int:
@@ -295,12 +432,21 @@ async def main(argv: Sequence[str] | None = None) -> int:
     global debug_mode_enabled
     debug_mode_enabled = args.debug
 
+    # Create log file
+    log_dir = Path.cwd() / "logs" / "recalc"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_filename = log_dir / f"recalc_{timestamp}.log"
+    
+    log_file = open(log_filename, "w", encoding="utf-8")
+    print(f"Logging to: {log_filename}")
+
     db = databases.Database(app.settings.DB_DSN)
     await db.connect()
 
     redis = await aioredis.from_url(app.settings.REDIS_DSN)  # type: ignore[no-untyped-call]
 
-    ctx = Context(db, redis)
+    ctx = Context(db, redis, log_file=log_file)
 
     for mode in args.mode:
         mode = GameMode(int(mode))
@@ -311,6 +457,13 @@ async def main(argv: Sequence[str] | None = None) -> int:
         if not args.no_stats:
             await recalculate_mode_users(mode, ctx)
 
+    # Write log file
+    write_log_file(ctx, args.mode, args.no_scores, args.no_stats)
+    
+    if ctx.log_file:
+        ctx.log_file.close()
+        print(f"\nLog file saved: {log_filename}")
+    
     await app.state.services.http_client.aclose()
     await db.disconnect()
     await redis.aclose()

@@ -1387,6 +1387,7 @@ class SendPrivateMessage(BasePacket):
                             results = app.usecases.performance.calculate_performances(
                                 osu_file_path=str(BEATMAPS_PATH / f"{bmap.id}.osu"),
                                 scores=scores,
+                                apply_pp_cap=False,  # Show uncapped PP for display purposes
                             )
 
                             resp_msg = " | ".join(

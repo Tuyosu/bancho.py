@@ -66,6 +66,8 @@ def calculate_performances(
     map_artist: str | None = None,
     map_creator: str | None = None,
     map_set_id: int | None = None,
+    apply_pp_cap: bool = True,  # Set to False for display purposes (bot commands)
+    player_id: int | None = None,  # Player ID for player-specific buffs
 ) -> list[PerformanceResult]:
     """\
     Calculate performance for multiple scores on a single beatmap.
@@ -96,8 +98,15 @@ def calculate_performances(
             if score.mods & Mods.NIGHTCORE:
                 score.mods |= Mods.DOUBLETIME
 
-        # Buff miss penalty by 15% (make misses hurt more)
-        MISS_PENALTY_MULTIPLIER = 1.15
+        # Check if Relax mod is active (Relax = 128)
+        is_relax = bool((score.mods or 0) & 128)
+        
+        # Adjust miss penalty based on mod
+        if is_relax:
+            MISS_PENALTY_MULTIPLIER = 1.20  # Relax: 20% more hurting
+        else:
+            MISS_PENALTY_MULTIPLIER = 1.15  # Normal: 15% more hurting
+        
         adjusted_misses = int((score.nmiss or 0) * MISS_PENALTY_MULTIPLIER) if score.nmiss else None
 
         # FIX: Removed 'mode' parameter - it's not accepted by Performance
@@ -124,10 +133,17 @@ def calculate_performances(
         result = calculator.calculate(calc_bmap)  # Changed from 'performance' to 'calculate'
 
         # Custom multipliers for each PP component
-        AIM_MULTIPLIER = 0.75      # Nerf aim by 25%
-        SPEED_MULTIPLIER = 1.25    # Buff speed by 25%
-        ACCURACY_MULTIPLIER = 1.20 # Buff accuracy by 20%
-        FLASHLIGHT_MULTIPLIER = 0.60 # Nerf flashlight by 40%
+        # Different values for Relax mod
+        if is_relax:
+            AIM_MULTIPLIER = 1.35      # Relax: Buff aim by 35%
+            SPEED_MULTIPLIER = 0.85    # Relax: Nerf speed by 15%
+            ACCURACY_MULTIPLIER = 1.20 # Same: Buff accuracy by 20%
+            FLASHLIGHT_MULTIPLIER = 0.60 # Same: Nerf flashlight by 40%
+        else:
+            AIM_MULTIPLIER = 1.10      # Normal: Buff aim by 10%
+            SPEED_MULTIPLIER = 1.20    # Normal: Buff speed by 20%
+            ACCURACY_MULTIPLIER = 1.35 # Normal: Buff accuracy by 35%
+            FLASHLIGHT_MULTIPLIER = 0.70 # Normal: Nerf flashlight by 30%
         
         # Apply multipliers to individual components
         pp_aim = (result.pp_aim or 0.0) * AIM_MULTIPLIER
@@ -159,8 +175,36 @@ def calculate_performances(
         
         # Apply map-specific nerf (speed-up maps, specific mappers, etc.)
         if map_title and map_artist and map_creator and map_set_id is not None:
-            map_nerf_multiplier = should_nerf_map(map_title, map_artist, map_creator, map_set_id)
+            map_nerf_multiplier = should_nerf_map(
+                map_title, 
+                map_artist, 
+                map_creator, 
+                map_set_id,
+                mods=score.mods or 0  # Pass mods to enable Relax-specific nerfs
+            )
             pp = pp * map_nerf_multiplier
+        
+        # Apply PP caps only if requested (for score submission)
+        # Skip for display purposes (bot commands showing theoretical PP)
+        if apply_pp_cap:
+            PP_CAPS = {
+                0: 55000,  # Standard
+                4: 55000,  # Relax
+                8: 20000,  # Autopilot
+            }
+            if score.mode in PP_CAPS and pp > PP_CAPS[score.mode]:
+                pp = float(PP_CAPS[score.mode])
+        
+        # Apply player-specific buffs
+        # Configure player buffs here: {player_id: multiplier}
+        PLAYER_BUFFS = {
+            4: 1.10,  # User ID 4 gets 1.10x PP buff (10% increase)
+            # Add more players as needed
+        }
+        
+        if player_id and player_id in PLAYER_BUFFS:
+            pp = pp * PLAYER_BUFFS[player_id]
+
 
         if math.isnan(pp) or math.isinf(pp):
             # TODO: report to logserver

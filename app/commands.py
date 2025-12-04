@@ -608,6 +608,7 @@ async def _with(ctx: Context) -> str | None:
     result = app.usecases.performance.calculate_performances(
         osu_file_path=str(BEATMAPS_PATH / f"{bmap.id}.osu"),
         scores=[score_args],  # calculate one score
+        apply_pp_cap=False,  # Show uncapped PP for display purposes
     )
 
     return "{msg}: {pp:.2f}pp ({stars:.2f}*)".format(
@@ -1118,9 +1119,11 @@ async def shutdown(ctx: Context) -> str | None | NoReturn:
         return "Process killed"
 
 
-@command(Privileges.ADMINISTRATOR, hidden=True)
-async def kaupec(ctx: Context) -> str | None:
-    """Fetch all maps from osu! API v2 and rank them progressively."""
+async def run_kaupec_sync() -> tuple[int, int]:
+    """
+    Run the kaupec synchronization process.
+    Returns (fetched_count, ranked_count).
+    """
     from app.adapters import osu_api_v2
     from app.objects.beatmap import BeatmapSet
     import asyncio
@@ -1128,15 +1131,30 @@ async def kaupec(ctx: Context) -> str | None:
     
     # Setup log file
     log_file = Path.cwd() / "kaupec.log"
+    MAX_LOG_LINES = 600
     
     def log_to_file(message: str):
-        """Write to log file with timestamp."""
+        """Write to log file with timestamp and auto-rotate after 600 lines."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_line = f"[{timestamp}] {message}\n"
+        
+        # Read existing lines if file exists
+        if log_file.exists():
+            with open(log_file, "r") as f:
+                lines = f.readlines()
+            
+            # Keep only last (MAX_LOG_LINES - 1) lines to make room for new line
+            if len(lines) >= MAX_LOG_LINES:
+                lines = lines[-(MAX_LOG_LINES - 1):]
+                with open(log_file, "w") as f:
+                    f.writelines(lines)
+        
+        # Append new log line
         with open(log_file, "a") as f:
-            f.write(f"[{timestamp}] {message}\n")
+            f.write(log_line)
     
-    log("[KAUPEC] Command started - logging to kaupec.log", Ansi.LYELLOW)
-    log_to_file("=== KAUPEC Command Started ===")
+    log("[KAUPEC] Sync started - logging to kaupec.log", Ansi.LYELLOW)
+    log_to_file("=== KAUPEC Sync Started ===")
     
     # Step 1: Fetch all beatmaps from osu! API v2
     log("[KAUPEC] Fetching all beatmaps from osu! API v2...", Ansi.LCYAN)
@@ -1146,6 +1164,34 @@ async def kaupec(ctx: Context) -> str | None:
     batch_count = 0
     cursor = None
     
+    # Discord webhook URL
+    WEBHOOK_URL = "https://discord.com/api/webhooks/1391070169035575417/C_Nx_t-wAWa8Q-e82ktci0iK5h3t44JfdzxP212zEFEqG0Aci_kwYAun7Li5T9C8mThq"
+    
+    async def send_webhook(message: str):
+        """Send a message to Discord webhook."""
+        try:
+            payload = {"content": message}
+            response = await app.state.services.http_client.post(
+                WEBHOOK_URL,
+                json=payload
+            )
+            if response.status_code == 204:
+                log_to_file(f"Webhook sent successfully: {message}")
+            else:
+                log_to_file(f"Webhook failed with status {response.status_code}")
+        except Exception as e:
+            log_to_file(f"Webhook error: {e}")
+    
+    async def fetch_beatmapset(bset_id: int) -> tuple[int, int, str | None]:
+        """Fetch a single beatmapset. Returns (bset_id, map_count, error)."""
+        try:
+            beatmapset = await BeatmapSet.from_bsid(bset_id)
+            if beatmapset:
+                return (bset_id, len(beatmapset.maps), None)
+            return (bset_id, 0, "Failed to fetch")
+        except Exception as e:
+            return (bset_id, 0, str(e))
+    
     try:
         while True:
             batch_count += 1
@@ -1153,7 +1199,7 @@ async def kaupec(ctx: Context) -> str | None:
             # Fetch beatmaps from API (all statuses, not just ranked)
             api_response = await osu_api_v2.api_get_ranked_beatmaps(
                 cursor_string=cursor,
-                limit=50  # API limit per request
+                limit=100  # API limit per request
             )
             
             beatmapsets = api_response.get("beatmapsets", [])
@@ -1161,31 +1207,50 @@ async def kaupec(ctx: Context) -> str | None:
                 log_to_file("No more beatmaps to fetch from API")
                 break
             
-            # Process each beatmapset
-            batch_fetched = 0
-            skipped = 0
-            for bset_data in beatmapsets:
-                bset_id = bset_data["id"]
-                
-                # Check if beatmapset already exists in database
-                existing_maps = await maps_repo.fetch_many(set_id=bset_id)
-                if existing_maps:
-                    # Already in database, skip
-                    skipped += 1
-                    continue
-                
-                # Fetch and cache the beatmapset
-                try:
-                    beatmapset = await BeatmapSet.from_bsid(bset_id)
-                    if beatmapset:
-                        batch_fetched += len(beatmapset.maps)
-                        fetched_count += len(beatmapset.maps)
-                        log_to_file(f"Added beatmapset #{bset_id} ({len(beatmapset.maps)} maps)")
-                except Exception as e:
-                    log_to_file(f"Error fetching beatmapset #{bset_id}: {e}")
+            # Bulk check which beatmapsets already exist (single query instead of N queries)
+            bset_ids = [bset_data["id"] for bset_data in beatmapsets]
+            existing_set_ids = set()
             
-            # Log batch completion to file
-            log_to_file(f"Batch #{batch_count}: {batch_fetched} maps fetched, {skipped} sets skipped | Total: {fetched_count} maps")
+            # Get all existing set_ids in one query
+            existing_rows = await app.state.services.database.fetch_all(
+                "SELECT DISTINCT set_id FROM maps WHERE set_id IN :set_ids",
+                {"set_ids": bset_ids}
+            )
+            existing_set_ids = {row["set_id"] for row in existing_rows}
+            
+            # Filter to only new beatmapsets
+            new_beatmapsets = [bset_id for bset_id in bset_ids if bset_id not in existing_set_ids]
+            skipped = len(bset_ids) - len(new_beatmapsets)
+            
+            # Fetch beatmapsets concurrently (20 at a time for maximum speed)
+            batch_fetched = 0
+            errors = 0
+            if new_beatmapsets:
+                # Process in chunks of 20 concurrent requests (increased from 10)
+                chunk_size = 20
+                for i in range(0, len(new_beatmapsets), chunk_size):
+                    chunk = new_beatmapsets[i:i + chunk_size]
+                    results = await asyncio.gather(*[fetch_beatmapset(bset_id) for bset_id in chunk])
+                    
+                    for bset_id, map_count, error in results:
+                        if error:
+                            errors += 1
+                        else:
+                            batch_fetched += map_count
+                            fetched_count += map_count
+            
+            # Simplified batch logging (no individual beatmapset logs for speed)
+            log_to_file(f"Batch #{batch_count}: {batch_fetched} maps fetched, {skipped} sets skipped, {errors} errors | Total: {fetched_count} maps")
+            
+            # Progress update to console every 5 batches
+            if batch_count % 5 == 0:
+                log(f"[KAUPEC] Progress: {batch_count} batches, {fetched_count} maps fetched", Ansi.LCYAN)
+            
+            # Send webhook notification every 300 batches
+            if batch_count % 300 == 0:
+                webhook_message = f"🔄 **Kaupec Progress Update**\n📊 Batch #{batch_count}\n🗺️ Total maps fetched: {fetched_count:,}\n✅ Current batch: {batch_fetched} maps\n⏭️ Skipped: {skipped} sets\n❌ Errors: {errors}"
+                await send_webhook(webhook_message)
+                log(f"[KAUPEC] Webhook sent at batch {batch_count}", Ansi.LGREEN)
             
             # Check for next page
             cursor = api_response.get("cursor_string")
@@ -1193,10 +1258,9 @@ async def kaupec(ctx: Context) -> str | None:
                 log_to_file("Reached end of API results")
                 break
             
-            # Wait 5 seconds every 6 batches to avoid rate limiting
-            if batch_count % 6 == 0:
-                log_to_file(f"Processed {batch_count} batches, waiting 5 seconds...")
-                await asyncio.sleep(5)
+            # Optional: Uncomment to add rate limiting (slows down but safer)
+            # if batch_count % 20 == 0:
+            #     await asyncio.sleep(1)
                 
     except Exception as e:
         log_to_file(f"Error fetching from API: {e}")
@@ -1209,49 +1273,61 @@ async def kaupec(ctx: Context) -> str | None:
     log("[KAUPEC] Ranking unranked maps in database...", Ansi.LCYAN)
     log_to_file("Starting ranking process for unranked maps")
     
-    all_maps = await maps_repo.fetch_many()
-    log_to_file(f"Found {len(all_maps)} total maps in database")
+    # Use direct SQL query for better performance
+    unranked_count = await app.state.services.database.fetch_val(
+        "SELECT COUNT(*) FROM maps WHERE status != :ranked_status",
+        {"ranked_status": RankedStatus.Ranked},
+        column=0
+    )
     
-    # Filter maps that are not already ranked
-    unranked_maps = [
-        map_data for map_data in all_maps 
-        if map_data["status"] != RankedStatus.Ranked
-    ]
+    log_to_file(f"Found {unranked_count} unranked maps to rank")
     
-    log_to_file(f"Found {len(unranked_maps)} unranked maps to rank")
-    
-    if not unranked_maps:
-        log_to_file("All maps are already ranked")
-        return f"Fetched {fetched_count} new maps. All maps are already ranked."
-    
-    total_maps = len(unranked_maps)
-    updated_count = 0
-    
-    # Update all unranked maps to ranked and frozen
-    for map_data in unranked_maps:
-        await maps_repo.partial_update(
-            id=map_data["id"],
-            status=RankedStatus.Ranked,
-            frozen=True,
+    if unranked_count > 0:
+        # Batch update all unranked maps to ranked and frozen using raw SQL for performance
+        await app.state.services.database.execute(
+            "UPDATE maps SET status = :status, frozen = :frozen WHERE status != :ranked_status",
+            {
+                "status": RankedStatus.Ranked,
+                "frozen": True,
+                "ranked_status": RankedStatus.Ranked,
+            }
         )
         
-        # Update cache if map is cached
-        if map_data["md5"] in app.state.cache.beatmap:
-            cached_map = app.state.cache.beatmap[map_data["md5"]]
-            cached_map.status = RankedStatus.Ranked
-            cached_map.frozen = True
+        log_to_file(f"Database update complete: {unranked_count} maps ranked")
         
-        updated_count += 1
+        # Update cache for all cached maps (only fetch md5s of updated maps)
+        updated_maps = await app.state.services.database.fetch_all(
+            "SELECT md5 FROM maps WHERE frozen = 1 AND status = :ranked_status",
+            {"ranked_status": RankedStatus.Ranked}
+        )
         
-        # Log every 100 maps
-        if updated_count % 100 == 0:
-            log_to_file(f"Ranked {updated_count}/{total_maps} maps")
+        cache_updated = 0
+        for row in updated_maps:
+            md5 = row["md5"]
+            if md5 in app.state.cache.beatmap:
+                cached_map = app.state.cache.beatmap[md5]
+                cached_map.status = RankedStatus.Ranked
+                cached_map.frozen = True
+                cache_updated += 1
+                
+                # Log progress every 300 maps
+                if cache_updated % 300 == 0:
+                    log_to_file(f"Progress: {cache_updated} maps ranked and cached so far...")
+        
+        log_to_file(f"Cache update complete: {cache_updated} cached maps updated")
     
-    log_to_file(f"Ranking complete: {updated_count} maps ranked")
-    log(f"[KAUPEC] Completed! Ranked {updated_count} maps", Ansi.LGREEN)
-    log_to_file("=== KAUPEC Command Completed ===")
+    log_to_file("=== KAUPEC Sync Completed ===")
+    log_to_file(f"SUMMARY: Fetched {fetched_count} new maps | Ranked {unranked_count} maps")
+    log(f"[KAUPEC] Completed! Ranked {unranked_count} maps", Ansi.LGREEN)
     
-    return f"Fetched {fetched_count} new maps from API. Ranked {updated_count} maps (frozen). Check kaupec.log for details."
+    return (fetched_count, unranked_count)
+
+
+@command(Privileges.ADMINISTRATOR, hidden=True)
+async def kaupec(ctx: Context) -> str | None:
+    """Fetch all maps from osu! API v2 and rank them progressively."""
+    fetched_count, unranked_count = await run_kaupec_sync()
+    return f"Fetched {fetched_count} new maps from API. Ranked {unranked_count} maps (frozen). Check kaupec.log for details."
 
 
 """ Developer commands

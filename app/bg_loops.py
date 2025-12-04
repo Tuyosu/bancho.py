@@ -27,6 +27,7 @@ async def initialize_housekeeping_tasks() -> None:
                 _update_bot_status(interval=5 * 60),
                 _disconnect_ghosts(interval=OSU_CLIENT_MIN_PING_INTERVAL // 3),
                 _server_status_webhook(interval=30 * 60),  # Every 30 minutes
+                _kaupec_sync(),  # Run once on startup
             )
         },
     )
@@ -94,3 +95,19 @@ async def _server_status_webhook(interval: int) -> None:
     """Send server status webhook to Discord every `interval` seconds."""
     from app.webhooks import server_status_webhook_loop
     await server_status_webhook_loop(interval)
+
+
+async def _kaupec_sync() -> None:
+    """Run kaupec synchronization once on server startup."""
+    from app.commands import run_kaupec_sync
+    
+    # Wait a bit for server to fully initialize
+    await asyncio.sleep(30)
+    
+    log("[KAUPEC] Starting automatic beatmap synchronization...", Ansi.LCYAN)
+    
+    try:
+        fetched_count, ranked_count = await run_kaupec_sync()
+        log(f"[KAUPEC] Auto-sync completed: {fetched_count} fetched, {ranked_count} ranked", Ansi.LGREEN)
+    except Exception as e:
+        log(f"[KAUPEC] Auto-sync failed: {e}", Ansi.LRED)
