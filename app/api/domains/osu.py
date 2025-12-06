@@ -65,6 +65,7 @@ from app.objects.beatmap import ensure_osu_file_is_available
 from app.objects.player import OsuStream
 from app.objects.player import Player
 from app.objects.player import Privileges
+from app.objects.player import ModeData
 from app.objects.score import Grade
 from app.objects.score import Score
 from app.objects.score import SubmissionStatus
@@ -742,7 +743,7 @@ async def osuSubmitModularSelector(
             ":n50, :nmiss, :ngeki, :nkatu, "
             ":grade, :status, :mode, :play_time, "
             ":time_elapsed, :client_flags, :user_id, :perfect, "
-            ":checksum)",
+            ":online_checksum)",
             {
                 "map_md5": score.bmap.md5,
                 "score": score.score,
@@ -764,7 +765,7 @@ async def osuSubmitModularSelector(
                 "client_flags": score.client_flags,
                 "user_id": score.player.id,
                 "perfect": score.perfect,
-                "checksum": score.client_checksum,
+                "online_checksum": score.client_checksum,
             },
         )
 
@@ -793,6 +794,12 @@ async def osuSubmitModularSelector(
     # shallow copy for the response charts.
     stats = score.player.stats[score.mode]
     prev_stats = copy.copy(stats)
+
+    # Ensure stats row exists in database before recalculating
+    # This is needed for wiped players or new players who don't have a stats row yet
+    existing_stats = await stats_repo.fetch_one(score.player.id, score.mode.value)
+    if existing_stats is None:
+        await stats_repo.create(score.player.id, score.mode.value)
 
     # recalculate stats
     stats = await score.player.recalc_stats_sql(score.mode)
@@ -1181,7 +1188,7 @@ async def osuSubmitModular(
         ":n50, :nmiss, :ngeki, :nkatu, "
         ":grade, :status, :mode, :play_time, "
         ":time_elapsed, :client_flags, :user_id, :perfect, "
-        ":checksum)",  
+        ":online_checksum)",  
         {
             "map_md5": score.bmap.md5,
             "score": score.score,
@@ -1203,7 +1210,7 @@ async def osuSubmitModular(
             "client_flags": score.client_flags,
             "user_id": score.player.id,
             "perfect": score.perfect,
-            "checksum": score.client_checksum,
+            "online_checksum": score.client_checksum,
         },
     )
 
@@ -1230,6 +1237,28 @@ async def osuSubmitModular(
     # get the current stats, and take a
     # shallow copy for the response charts.
     # stats = score.player.gm_stats
+    # Ensure stats are loaded for this mode - create default if not exists
+    if score.mode not in score.player.stats:
+        score.player.stats[score.mode] = ModeData(
+            tscore=0,
+            rscore=0,
+            pp=0,
+            acc=0.0,
+            plays=0,
+            playtime=0,
+            max_combo=0,
+            total_hits=0,
+            rank=0,
+            bancho_rank=0,
+            grades={
+                Grade.XH: 0,
+                Grade.X: 0,
+                Grade.SH: 0,
+                Grade.S: 0,
+                Grade.A: 0,
+            },
+        )
+    
     stats = score.player.stats[score.mode] # https://github.com/osuAkatsuki/bancho.py/commit/2748ff8e1aec59157f0907ca6534db55e2c4b54a
     prev_stats = copy.copy(stats)
 
@@ -1287,6 +1316,9 @@ async def osuSubmitModular(
                     stats_updates[grade_col] = stats.grades[score.grade]
 
             stats.rscore += additional_rscore
+            # Ensure rscore doesn't go negative (can happen if new best score is lower than prev best)
+            if stats.rscore < 0:
+                stats.rscore = 0
             stats_updates["rscore"] = stats.rscore
 
             # fetch scores sorted by pp for total acc/pp calc
@@ -1319,12 +1351,19 @@ async def osuSubmitModular(
             stats.pp = round(weighted_pp + bonus_pp)
             stats_updates["pp"] = stats.pp
 
+
             # update global & country ranking
             stats.rank = await score.player.update_rank(score.mode)
 
+    # Ensure stats row exists in database before updating
+    # This is needed for wiped players or new players who don't have a stats row yet
+    existing_stats = await stats_repo.fetch_one(score.player.id, score.mode.value)
+    if existing_stats is None:
+        await stats_repo.create(score.player.id, score.mode.value)
+
     await stats_repo.partial_update(
         score.player.id,
-        score.mode,
+        score.mode.value,
         plays=stats_updates.get("plays", UNSET),
         playtime=stats_updates.get("playtime", UNSET),
         tscore=stats_updates.get("tscore", UNSET),
