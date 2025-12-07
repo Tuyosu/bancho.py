@@ -759,12 +759,13 @@ async def handle_osu_login_request(
                 # don't allow anything older than this
                 break
 
-    dev_acc = ['nyoemii', 'MyAngelMiku']
+    dev_acc = ['nyoemii', 'MyAngelMiku', 'GayFemboy']
     if login_data["username"].replace(' ', '_').lower() not in dev_acc:
-        if str(osu_version.date) != app.settings.ALLOWED_CLIENT_VER:
+        if str(osu_version.date) not in app.settings.ALLOWED_CLIENT_VER:
+            allowed_versions = ', '.join(app.settings.ALLOWED_CLIENT_VER)
             return {
                 "osu_token": "no",
-                "response_body": (app.packets.notification(f'Please update your client!\nYour version: {osu_version.date}\nCurrent version: {os.environ["ALLOWED_CLIENT_VER"]}')),
+                "response_body": (app.packets.notification(f'Please update your client!\nYour version: {osu_version.date}\nAllowed versions: {allowed_versions}')),
             }
 
     running_under_wine = login_data["adapters_str"] == "runningunderwine"

@@ -66,6 +66,7 @@ def calculate_performances(
     map_artist: str | None = None,
     map_creator: str | None = None,
     map_set_id: int | None = None,
+    map_length: int | None = None,  # Map length in seconds for length buff/nerf
     apply_pp_cap: bool = True,  # Set to False for display purposes (bot commands)
     player_id: int | None = None,  # Player ID for player-specific buffs
 ) -> list[PerformanceResult]:
@@ -103,9 +104,9 @@ def calculate_performances(
         
         # Adjust miss penalty based on mod
         if is_relax:
-            MISS_PENALTY_MULTIPLIER = 1.20  # Relax: 20% more hurting
+            MISS_PENALTY_MULTIPLIER = 1.05  # Relax: 5% more hurting
         else:
-            MISS_PENALTY_MULTIPLIER = 1.15  # Normal: 15% more hurting
+            MISS_PENALTY_MULTIPLIER = 1.00  # Normal: No penalty
         
         adjusted_misses = int((score.nmiss or 0) * MISS_PENALTY_MULTIPLIER) if score.nmiss else None
 
@@ -136,13 +137,13 @@ def calculate_performances(
         # Different values for Relax mod
         if is_relax:
             AIM_MULTIPLIER = 1.35      # Relax: Buff aim by 35%
-            SPEED_MULTIPLIER = 0.85    # Relax: Nerf speed by 15%
-            ACCURACY_MULTIPLIER = 1.20 # Same: Buff accuracy by 20%
-            FLASHLIGHT_MULTIPLIER = 0.60 # Same: Nerf flashlight by 40%
+            SPEED_MULTIPLIER = 1.10    # Relax: Buff speed by 10%
+            ACCURACY_MULTIPLIER = 1.25 # Relax: Buff accuracy by 25%
+            FLASHLIGHT_MULTIPLIER = 0.75 # Relax: Nerf flashlight by 25%
         else:
             AIM_MULTIPLIER = 1.10      # Normal: Buff aim by 10%
             SPEED_MULTIPLIER = 1.20    # Normal: Buff speed by 20%
-            ACCURACY_MULTIPLIER = 1.35 # Normal: Buff accuracy by 35%
+            ACCURACY_MULTIPLIER = 1.20 # Normal: Buff accuracy by 20%
             FLASHLIGHT_MULTIPLIER = 0.70 # Normal: Nerf flashlight by 30%
         
         # Apply multipliers to individual components
@@ -184,6 +185,28 @@ def calculate_performances(
             )
             pp = pp * map_nerf_multiplier
         
+        # Apply CS nerf for Relax mode only (25% nerf for CS > 6)
+        if is_relax and calc_bmap.cs > 6:
+            CS_NERF_MULTIPLIER = 0.75  # 25% nerf
+            pp = pp * CS_NERF_MULTIPLIER
+        
+        # Apply length buff/nerf (reward longer maps, punish very short maps)
+        # Nerf: 10% nerf for maps < 1min
+        # Buff: 5% at 3min, 10% at 4min, 15% at 5min+
+        if map_length is not None:
+            map_length_seconds = map_length  # Total length from parameter
+            if map_length_seconds < 60:  # Less than 1 minute
+                LENGTH_NERF_MULTIPLIER = 0.90  # 10% nerf
+                pp = pp * LENGTH_NERF_MULTIPLIER
+            elif map_length_seconds >= 180:  # 3 minutes or more
+                if map_length_seconds >= 300:  # 5+ minutes
+                    LENGTH_BUFF_MULTIPLIER = 1.15  # 15% buff
+                elif map_length_seconds >= 240:  # 4-5 minutes
+                    LENGTH_BUFF_MULTIPLIER = 1.10  # 10% buff
+                else:  # 3-4 minutes
+                    LENGTH_BUFF_MULTIPLIER = 1.05  # 5% buff
+                pp = pp * LENGTH_BUFF_MULTIPLIER
+        
         # Apply PP caps only if requested (for score submission)
         # Skip for display purposes (bot commands showing theoretical PP)
         if apply_pp_cap:
@@ -198,8 +221,7 @@ def calculate_performances(
         # Apply player-specific buffs
         # Configure player buffs here: {player_id: multiplier}
         PLAYER_BUFFS = {
-            4: 1.10,  # User ID 4 gets 1.10x PP buff (10% increase)
-            # Add more players as needed
+            # Add players as needed
         }
         
         if player_id and player_id in PLAYER_BUFFS:

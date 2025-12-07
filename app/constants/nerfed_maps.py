@@ -76,11 +76,11 @@ def should_nerf_map(title: str, artist: str, creator: str, set_id: int, mods: in
     if creator in MAPPER_NERFS:
         base_nerf = MAPPER_NERFS[creator]
         
-        # Apply additional nerf for Relax mod (reduce by another 15%)
+        # Apply additional nerf for Relax mod (reduce by another 5%)
         if is_relax:
-            # If base nerf is 0.65 (35% nerf), relax makes it 0.5525 (44.75% total nerf)
-            # Formula: base_nerf * 0.85 (additional 15% reduction)
-            return base_nerf * 0.85
+            # If base nerf is 0.65 (35% nerf), relax makes it 0.6175 (38.25% total nerf)
+            # Formula: base_nerf * 0.95 (additional 5% reduction)
+            return base_nerf * 0.95
         
         return base_nerf
     
