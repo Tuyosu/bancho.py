@@ -345,6 +345,7 @@ class Score:
             map_artist=self.bmap.artist if self.bmap else None,
             map_creator=self.bmap.creator if self.bmap else None,
             map_set_id=self.bmap.set_id if self.bmap else None,
+            map_length=self.bmap.total_length if self.bmap else None,  # Pass map length for length buff/nerf
             player_id=self.player.id if self.player else None,  # Pass player ID for buffs
         )
         
