@@ -98,16 +98,24 @@ async def _server_status_webhook(interval: int) -> None:
 
 
 async def _kaupec_sync() -> None:
-    """Run kaupec synchronization once on server startup."""
+    """Run kaupec synchronization continuously every 6 hours."""
     from app.commands import run_kaupec_sync
     
     # Wait a bit for server to fully initialize
     await asyncio.sleep(30)
     
-    log("[KAUPEC] Starting automatic beatmap synchronization...", Ansi.LCYAN)
+    # Run continuously every 6 hours
+    SYNC_INTERVAL = 6 * 60 * 60  # 6 hours in seconds
     
-    try:
-        fetched_count, ranked_count = await run_kaupec_sync()
-        log(f"[KAUPEC] Auto-sync completed: {fetched_count} fetched, {ranked_count} ranked", Ansi.LGREEN)
-    except Exception as e:
-        log(f"[KAUPEC] Auto-sync failed: {e}", Ansi.LRED)
+    while True:
+        log("[KAUPEC] Starting automatic beatmap synchronization...", Ansi.LCYAN)
+        
+        try:
+            fetched_count, ranked_count, unranked_count = await run_kaupec_sync()
+            log(f"[KAUPEC] Auto-sync completed: {fetched_count} fetched, {ranked_count} ranked, {unranked_count} unranked", Ansi.LGREEN)
+        except Exception as e:
+            log(f"[KAUPEC] Auto-sync failed: {e}", Ansi.LRED)
+        
+        # Wait for next sync
+        log(f"[KAUPEC] Next sync in {SYNC_INTERVAL // 3600} hours", Ansi.LCYAN)
+        await asyncio.sleep(SYNC_INTERVAL)

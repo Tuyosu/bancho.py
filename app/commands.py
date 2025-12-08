@@ -1269,23 +1269,68 @@ async def run_kaupec_sync() -> tuple[int, int]:
     log_to_file(f"API fetch complete: {fetched_count} new maps fetched from {batch_count} batches")
     log(f"[KAUPEC] Fetched {fetched_count} new maps from API", Ansi.LGREEN)
     
-    # Step 2: Rank all unranked maps in database
-    log("[KAUPEC] Ranking unranked maps in database...", Ansi.LCYAN)
-    log_to_file("Starting ranking process for unranked maps")
+    # Step 1.5: Unrank any existing ranked maps with CS >= 7
+    log("[KAUPEC] Checking for ranked maps with CS >= 7...", Ansi.LCYAN)
+    log_to_file("Checking for high CS ranked maps to convert to Loved")
     
-    # Use direct SQL query for better performance
-    unranked_count = await app.state.services.database.fetch_val(
-        "SELECT COUNT(*) FROM maps WHERE status != :ranked_status",
+    high_cs_count = await app.state.services.database.fetch_val(
+        "SELECT COUNT(*) FROM maps WHERE status = :ranked_status AND cs >= 7.0",
         {"ranked_status": RankedStatus.Ranked},
         column=0
     )
     
-    log_to_file(f"Found {unranked_count} unranked maps to rank")
+    if high_cs_count > 0:
+        log_to_file(f"Found {high_cs_count} ranked maps with CS >= 7, converting to Loved...")
+        log_to_file(f"Reason: Maps with Circle Size >= 7.0 are converted to Loved (leaderboards but no PP)")
+        
+        # Convert maps with CS >= 7 to Loved
+        await app.state.services.database.execute(
+            "UPDATE maps SET status = :loved_status, frozen = :frozen WHERE status = :ranked_status AND cs >= 7.0",
+            {
+                "loved_status": RankedStatus.Loved,
+                "frozen": True,
+                "ranked_status": RankedStatus.Ranked,
+            }
+        )
+        
+        # Update cache for loved maps
+        loved_maps = await app.state.services.database.fetch_all(
+            "SELECT md5 FROM maps WHERE cs >= 7.0 AND status = :loved_status",
+            {"loved_status": RankedStatus.Loved}
+        )
+        
+        cache_updated = 0
+        for row in loved_maps:
+            md5 = row["md5"]
+            if md5 in app.state.cache.beatmap:
+                cached_map = app.state.cache.beatmap[md5]
+                cached_map.status = RankedStatus.Loved
+                cached_map.frozen = True
+                cache_updated += 1
+        
+        log_to_file(f"Converted {high_cs_count} maps with CS >= 7 to Loved (cache updated: {cache_updated})")
+        log_to_file(f"Conversion complete - Reason: CS >= 7.0 (now Loved - has leaderboards but no PP)")
+        log(f"[KAUPEC] Converted {high_cs_count} maps with CS >= 7 to Loved", Ansi.LGREEN)
+    else:
+        log_to_file("No ranked maps with CS >= 7 found")
+    
+    # Step 2: Rank all unranked maps in database (excluding CS >= 7)
+    log("[KAUPEC] Ranking unranked maps in database...", Ansi.LCYAN)
+    log_to_file("Starting ranking process for unranked maps (CS < 7 only)")
+    
+    # Use direct SQL query for better performance (exclude CS >= 7)
+    unranked_count = await app.state.services.database.fetch_val(
+        "SELECT COUNT(*) FROM maps WHERE status != :ranked_status AND cs < 7.0",
+        {"ranked_status": RankedStatus.Ranked},
+        column=0
+    )
+    
+    log_to_file(f"Found {unranked_count} unranked maps eligible for ranking (CS < 7.0)")
     
     if unranked_count > 0:
-        # Batch update all unranked maps to ranked and frozen using raw SQL for performance
+        # Batch update unranked maps to ranked and frozen, EXCLUDING maps with CS >= 7
         await app.state.services.database.execute(
-            "UPDATE maps SET status = :status, frozen = :frozen WHERE status != :ranked_status",
+            "UPDATE maps SET status = :status, frozen = :frozen WHERE status != :ranked_status AND cs < 7.0",
             {
                 "status": RankedStatus.Ranked,
                 "frozen": True,
@@ -1293,7 +1338,7 @@ async def run_kaupec_sync() -> tuple[int, int]:
             }
         )
         
-        log_to_file(f"Database update complete: {unranked_count} maps ranked")
+        log_to_file(f"Database update complete: {unranked_count} maps ranked (CS < 7 only)")
         
         # Update cache for all cached maps (only fetch md5s of updated maps)
         updated_maps = await app.state.services.database.fetch_all(
@@ -1317,17 +1362,26 @@ async def run_kaupec_sync() -> tuple[int, int]:
         log_to_file(f"Cache update complete: {cache_updated} cached maps updated")
     
     log_to_file("=== KAUPEC Sync Completed ===")
-    log_to_file(f"SUMMARY: Fetched {fetched_count} new maps | Ranked {unranked_count} maps")
-    log(f"[KAUPEC] Completed! Ranked {unranked_count} maps", Ansi.LGREEN)
+    log_to_file(f"SUMMARY: Fetched {fetched_count} new maps | Converted {high_cs_count} high CS maps to Loved | Ranked {unranked_count} maps (CS < 7)")
+    log(f"[KAUPEC] Completed! Ranked {unranked_count} maps, Converted {high_cs_count} high CS maps to Loved", Ansi.LGREEN)
     
-    return (fetched_count, unranked_count)
+    return (fetched_count, unranked_count, high_cs_count)
 
 
 @command(Privileges.ADMINISTRATOR, hidden=True)
 async def kaupec(ctx: Context) -> str | None:
     """Fetch all maps from osu! API v2 and rank them progressively."""
-    fetched_count, unranked_count = await run_kaupec_sync()
-    return f"Fetched {fetched_count} new maps from API. Ranked {unranked_count} maps (frozen). Check kaupec.log for details."
+    fetched_count, ranked_count, loved_count = await run_kaupec_sync()
+    
+    response_lines = [
+        f"📊 Kaupec Sync Complete:",
+        f"✅ Fetched: {fetched_count} new maps from API",
+        f"✅ Ranked: {ranked_count} maps (Reason: CS < 7.0)",
+        f"💜 Loved: {loved_count} maps (Reason: CS >= 7.0 - has leaderboards but no PP)",
+        f"📝 Check kaupec.log for details"
+    ]
+    
+    return "\n".join(response_lines)
 
 
 """ Developer commands

@@ -1065,6 +1065,13 @@ async def handle_osu_login_request(
                 recipient=msg["to_name"],
                 sender_id=msg["from_id"],
             )
+            
+            # Mark this message as read so it won't be sent again on next login
+            await mail_repo.mark_conversation_as_read(
+                to_id=player.id,
+                from_id=msg["from_id"],
+            )
+
 
         if not player.priv & Privileges.VERIFIED:
             # this is the player's first login, verify their
@@ -2160,7 +2167,8 @@ class ChannelPart(BasePacket):
         self.name = reader.read_string()
 
     async def handle(self, player: Player) -> None:
-        if self.name in IGNORED_CHANNELS:
+        # Ignore special channels and PM channels (PM channels don't start with #)
+        if self.name in IGNORED_CHANNELS or not self.name.startswith("#"):
             return
 
         channel = app.state.sessions.channels.get_by_name(self.name)

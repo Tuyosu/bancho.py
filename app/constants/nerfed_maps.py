@@ -40,7 +40,7 @@ MAPPER_NERFS = {
 }
 
 # Default nerf multiplier for speed-up maps (15% nerf)
-MAPSET_NERF_MULTIPLIER = 0.85  # 15% nerf
+MAPSET_NERF_MULTIPLIER = 0.75  # 25% nerf
 
 
 def should_nerf_map(title: str, artist: str, creator: str, set_id: int, mods: int = 0) -> float:
@@ -55,7 +55,7 @@ def should_nerf_map(title: str, artist: str, creator: str, set_id: int, mods: in
         mods: Mods used (for detecting Relax mod)
     
     Returns:
-        float: Multiplier to apply (1.0 = no nerf, 0.85 = 15% nerf)
+        float: Multiplier to apply (1.0 = no nerf, 0.75 = 25% nerf)
     """
     # Check if Relax mod is active (Relax = 128)
     is_relax = bool(mods & 128)
