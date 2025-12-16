@@ -111,8 +111,8 @@ async def _kaupec_sync() -> None:
         log("[KAUPEC] Starting automatic beatmap synchronization...", Ansi.LCYAN)
         
         try:
-            fetched_count, ranked_count, unranked_count = await run_kaupec_sync()
-            log(f"[KAUPEC] Auto-sync completed: {fetched_count} fetched, {ranked_count} ranked, {unranked_count} unranked", Ansi.LGREEN)
+            fetched_count, ranked_count, loved_cs_count, loved_star_count = await run_kaupec_sync()
+            log(f"[KAUPEC] Auto-sync completed: {fetched_count} fetched, {ranked_count} ranked, {loved_cs_count} loved (CS), {loved_star_count} loved (stars)", Ansi.LGREEN)
         except Exception as e:
             log(f"[KAUPEC] Auto-sync failed: {e}", Ansi.LRED)
         
