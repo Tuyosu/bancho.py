@@ -98,13 +98,27 @@ async def recalculate_score(
         if is_relax:
             AIM_MULTIPLIER = 1.35      # Relax: Buff aim by 35%
             SPEED_MULTIPLIER = 1.10    # Relax: Buff speed by 10%
-            ACCURACY_MULTIPLIER = 1.25 # Relax: Buff accuracy by 25%
             FLASHLIGHT_MULTIPLIER = 0.75 # Relax: Nerf flashlight by 25%
         else:
             AIM_MULTIPLIER = 1.10      # Normal: Buff aim by 10%
             SPEED_MULTIPLIER = 1.20    # Normal: Buff speed by 20%
-            ACCURACY_MULTIPLIER = 1.20 # Normal: Buff accuracy by 20%
             FLASHLIGHT_MULTIPLIER = 0.70 # Normal: Nerf flashlight by 30%
+        
+        # Dynamic accuracy multiplier based on score accuracy
+        # More lenient for higher accuracy, especially 97-100%
+        score_acc = score.get('acc', 100.0)
+        if score_acc >= 100.0:
+            ACCURACY_MULTIPLIER = 1.33  # Perfect accuracy
+        elif score_acc >= 99.0:
+            ACCURACY_MULTIPLIER = 1.31  # 99-100%
+        elif score_acc >= 98.0:
+            ACCURACY_MULTIPLIER = 1.27  # 98-99%
+        elif score_acc >= 97.0:
+            ACCURACY_MULTIPLIER = 1.24  # 97-98%
+        elif score_acc >= 95.0:
+            ACCURACY_MULTIPLIER = 1.19  # 95-97%
+        else:
+            ACCURACY_MULTIPLIER = 1.16  # < 95%
         
         # Apply multipliers to individual components
         pp_aim = (attrs.pp_aim or 0.0) * AIM_MULTIPLIER
