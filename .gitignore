@@ -27,3 +27,4 @@ pp-ffi/
 recalc_all_users.sh
 recalc_all_stats.sql
 recalc_stats.sql
+restart.log
