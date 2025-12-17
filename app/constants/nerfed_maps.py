@@ -3,7 +3,7 @@ Configuration for map-specific and mapper-specific PP nerfs.
 """
 
 # Patterns to detect in map titles/artists (case-insensitive)
-# Maps matching these patterns will receive MAPSET_NERF_MULTIPLIER
+# Maps matching these patterns will receive MAPSET_NERF_MULTIPLIER (or RELAX_MAPSET_NERF_MULTIPLIER for relax)
 NERFED_TITLE_PATTERNS = [
     "speed-up",
     "speed up",
@@ -11,8 +11,9 @@ NERFED_TITLE_PATTERNS = [
     "speed-up map",
     "speed up map pack",
     "sped up pack",
-    "over Speed-up pack"
-    "over speed-up pack"
+    "over Speed-up pack",
+    "over speed-up pack",
+    "red line",
 ]
 
 # Specific beatmap set IDs to nerf (if you want to manually add specific sets)
@@ -37,10 +38,13 @@ MAPPER_NERFS = {
     "tazuwik": 0.75,  # 25% nerf (reduced from 35%)
     "kselon": 0.75,  # 25% nerf (reduced from 35%)
     "DTtheCarry": 0.65,  # 35% nerf
+    "egotist": 0.87,  # 13% nerf
+    "Takilover44": 0.87,  # 13% nerf
 }
 
-# Default nerf multiplier for speed-up maps (15% nerf)
-MAPSET_NERF_MULTIPLIER = 0.75  # 25% nerf
+# Default nerf multiplier for speed-up maps
+MAPSET_NERF_MULTIPLIER = 0.75  # 25% nerf for standard mode
+RELAX_MAPSET_NERF_MULTIPLIER = 1.10  # 10% buff for relax mode
 
 
 def should_nerf_map(title: str, artist: str, creator: str, set_id: int, mods: int = 0) -> float:
@@ -55,7 +59,7 @@ def should_nerf_map(title: str, artist: str, creator: str, set_id: int, mods: in
         mods: Mods used (for detecting Relax mod)
     
     Returns:
-        float: Multiplier to apply (1.0 = no nerf, 0.75 = 25% nerf)
+        float: Multiplier to apply (1.0 = no nerf, 1.10 = 10% buff, 0.75 = 25% nerf)
     """
     # Check if Relax mod is active (Relax = 128)
     is_relax = bool(mods & 128)
@@ -63,14 +67,16 @@ def should_nerf_map(title: str, artist: str, creator: str, set_id: int, mods: in
     title_lower = title.lower()
     artist_lower = artist.lower()
     
-    # Check for title pattern matches
+    # Check for title pattern matches (speed-up maps)
     for pattern in NERFED_TITLE_PATTERNS:
         if pattern in title_lower or pattern in artist_lower:
-            return MAPSET_NERF_MULTIPLIER
+            # Apply lesser nerf for relax mode
+            return RELAX_MAPSET_NERF_MULTIPLIER if is_relax else MAPSET_NERF_MULTIPLIER
     
     # Check for specific set ID
     if set_id in NERFED_MAPSET_IDS:
-        return MAPSET_NERF_MULTIPLIER
+        # Apply lesser nerf for relax mode
+        return RELAX_MAPSET_NERF_MULTIPLIER if is_relax else MAPSET_NERF_MULTIPLIER
     
     # Check for mapper-specific nerf
     if creator in MAPPER_NERFS:

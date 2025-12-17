@@ -104,7 +104,7 @@ def calculate_performances(
         
         # Adjust miss penalty based on mod
         if is_relax:
-            MISS_PENALTY_MULTIPLIER = 1.05  # Relax: 5% more hurting
+            MISS_PENALTY_MULTIPLIER = 1.00  # Relax: No penalty (made more lenient)
         else:
             MISS_PENALTY_MULTIPLIER = 1.00  # Normal: No penalty
         
@@ -137,7 +137,7 @@ def calculate_performances(
         # Different values for Relax mod
         if is_relax:
             AIM_MULTIPLIER = 1.35      # Relax: Buff aim by 35%
-            SPEED_MULTIPLIER = 1.10    # Relax: Buff speed by 10%
+            SPEED_MULTIPLIER = 1.175   # Relax: Buff speed by 17.5% (made more lenient)
             FLASHLIGHT_MULTIPLIER = 0.75 # Relax: Nerf flashlight by 25%
         else:
             AIM_MULTIPLIER = 1.10      # Normal: Buff aim by 10%
@@ -199,9 +199,9 @@ def calculate_performances(
             )
             pp = pp * map_nerf_multiplier
         
-        # Apply CS nerf for Relax mode only (25% nerf for CS > 6)
+        # Apply CS nerf for Relax mode only (12.5% nerf for CS > 6, made more lenient)
         if is_relax and calc_bmap.cs > 6:
-            CS_NERF_MULTIPLIER = 0.75  # 25% nerf
+            CS_NERF_MULTIPLIER = 0.875  # 12.5% nerf (reduced from 25%)
             pp = pp * CS_NERF_MULTIPLIER
         
         # Apply length buff/nerf (reward longer maps, punish very short maps)
